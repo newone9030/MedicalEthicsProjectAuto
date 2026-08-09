@@ -10,6 +10,11 @@ from app.task.task_service import (
     publish_task, close_task, delete_task
 )
 from app.case.case_service import list_cases
+from app.response.response_service import (
+    get_task_response_summary,
+    admin_delete_student_responses,
+    admin_delete_all_responses,
+)
 
 
 def build_task_list_view(page: ft.Page, on_create, on_edit) -> ft.Column:
@@ -119,6 +124,13 @@ def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Conta
                          on_click=lambda e, t=task: on_edit(t['id'], page)),
     ]
 
+    # 非草稿任务可以管理作答
+    if task['status'] != 'draft':
+        menu_items.append(
+            ft.PopupMenuItem(content='管理作答', icon=ft.Icons.PEOPLE,
+                             on_click=lambda e, t=task: _show_response_manager(t, page, on_refresh)),
+        )
+
     if task['status'] == 'draft':
         menu_items.append(
             ft.PopupMenuItem(content='发布', icon=ft.Icons.PUBLISH,
@@ -214,6 +226,154 @@ def _show_snack(page: ft.Page, result: dict):
     page.overlay.append(snack)
     snack.open = True
     page.update()
+
+
+def _show_response_manager(task: dict, page: ft.Page, on_refresh):
+    """显示作答管理对话框：列出所有已提交作答的学生，支持删除单个或全部作答"""
+
+    # -- 第一步：创建所有 UI 控件（不调用任何数据查询或 .update()） --
+
+    response_list = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, height=300)
+    count_text = ft.Text('加载中...', size=12, color='#757575')
+    clear_all_btn = ft.OutlinedButton(
+        content='清除全部作答',
+        icon=ft.Icons.DELETE_SWEEP,
+        style=ft.ButtonStyle(color='#FF5252',
+                             side=ft.BorderSide(color='#FF5252', width=1)),
+    )
+    # 用一个可变容器持有 summary 数据，供内部闭包引用
+    summary_holder = {'data': []}
+    # 标志：对话框是否仍处于打开状态
+    dlg_opened = {'value': True}
+
+    def close_dlg(e=None):
+        dlg_opened['value'] = False
+        dlg2.open = False
+        page.update()
+
+    def clear_all(e):
+        count = len(summary_holder['data'])
+        confirm_text = f'确定要删除任务「{task["name"]}」下所有 {count} 名学生的作答记录吗？\n\n此操作不可撤销！'
+
+        def do_clear(e2):
+            confirm_dlg.open = False
+            page.update()
+            result = admin_delete_all_responses(task['id'])
+            _show_snack(page, result)
+            if result['success']:
+                on_refresh()
+                close_dlg()
+
+        def close_confirm(e2):
+            confirm_dlg.open = False
+            page.update()
+
+        confirm_dlg = ft.AlertDialog(
+            title=ft.Text('确认清除全部作答'),
+            content=ft.Text(confirm_text),
+            actions=[
+                ft.TextButton(content='取消', on_click=close_confirm),
+                ft.ElevatedButton(content='确认清除', on_click=do_clear,
+                                  style=ft.ButtonStyle(bgcolor='#FF5252', color='white')),
+            ],
+            modal=True,
+        )
+        page.overlay.append(confirm_dlg)
+        confirm_dlg.open = True
+        page.update()
+
+    clear_all_btn.on_click = clear_all
+
+    dlg2 = ft.AlertDialog(
+        title=ft.Row([
+            ft.Text(f'作答管理 - {task["name"]}', size=16, weight=ft.FontWeight.W_500),
+            ft.Container(expand=True),
+            ft.IconButton(icon=ft.Icons.CLOSE, on_click=close_dlg, icon_size=20),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        content=ft.Column([
+            count_text,
+            ft.Divider(height=8, color='transparent'),
+            response_list,
+            ft.Divider(height=12, color='transparent'),
+            ft.Row([
+                ft.Container(expand=True),
+                clear_all_btn,
+            ]),
+        ], spacing=0),
+        actions=[
+            ft.TextButton(content='关闭', on_click=close_dlg),
+        ],
+        modal=True,
+    )
+    # 对话框挂载到页面
+    page.overlay.append(dlg2)
+    dlg2.open = True
+    page.update()
+
+    # -- 第二步：所有控件已加载到页面后，再查询数据并填充列表 --
+
+    def build_response_list_content():
+        """根据 summary_holder['data'] 重新构建列表内容"""
+        if not dlg_opened['value']:
+            return
+        response_list.controls.clear()
+        summary = summary_holder['data']
+        count_text.value = f'共 {len(summary)} 名学生已提交作答'
+        if not summary:
+            response_list.controls.append(
+                ft.Text('暂无学生作答记录', color='#9E9E9E', size=13)
+            )
+            clear_all_btn.visible = False
+        else:
+            clear_all_btn.visible = True
+            for s in summary:
+                sid = s['student_id']
+                sname = s['real_name']
+
+                def make_delete_handler(_sid=sid, _sname=sname):
+                    def handler(e):
+                        _do_delete_one_response(task['id'], _sid, _sname, page,
+                                                summary_holder, build_response_list_content)
+                    return handler
+
+                response_list.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Column([
+                                ft.Text(sname, size=13, weight=ft.FontWeight.W_500),
+                                ft.Text(
+                                    f'{s["submitted_count"]}/{s["total_cases"]} 个案例已提交',
+                                    size=11, color='#4CAF50',
+                                ),
+                            ], spacing=2, expand=True),
+                            ft.IconButton(
+                                icon=ft.Icons.DELETE_OUTLINE,
+                                icon_color='#FF5252', icon_size=18,
+                                tooltip=f'删除 {sname} 的作答',
+                                on_click=make_delete_handler(),
+                            ),
+                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        bgcolor='#FAFAFA',
+                        border_radius=8,
+                        padding=ft.Padding(12, 8, 8, 8),
+                    )
+                )
+        page.update()
+
+    # 查询数据并填充
+    summary_holder['data'] = get_task_response_summary(task['id'])
+    build_response_list_content()
+
+
+def _do_delete_one_response(task_id, student_id, student_name, page, summary_holder, refresh_callback):
+    """删除单个学生的作答"""
+    result = admin_delete_student_responses(task_id, student_id)
+    _show_snack(page, result)
+    if result['success']:
+        # 从 summary 列表中移除该学生
+        summary_holder['data'][:] = [s for s in summary_holder['data'] if s['student_id'] != student_id]
+        refresh_callback()
 
 
 def build_task_editor_view(page: ft.Page, task_id: int = None, on_back=None) -> list:

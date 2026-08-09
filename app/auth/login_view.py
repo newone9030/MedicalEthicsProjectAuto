@@ -227,12 +227,6 @@ def build_login_view(page: ft.Page) -> list:
         width=float('inf'),
     )
 
-    register_link = ft.TextButton(
-        content='没有账号？去注册',
-        on_click=toggle_mode,
-        style=ft.ButtonStyle(color='#1976D2'),
-    )
-
     login_card = ft.Container(
         content=ft.Column([
             ft.Row([role_tabs]),
@@ -258,10 +252,6 @@ def build_login_view(page: ft.Page) -> list:
             error_label,
             ft.Divider(height=5, color='transparent'),
             submit_btn,
-            ft.Container(
-                content=register_link,
-                alignment=ft.Alignment.CENTER,
-            ),
         ], spacing=12),
         bgcolor='white',
         border_radius=16,

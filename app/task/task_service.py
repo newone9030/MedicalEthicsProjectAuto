@@ -75,7 +75,7 @@ def update_task(task_id: int, name: str, description: str, start_time: datetime,
 
 
 def delete_task(task_id: int) -> dict:
-    """删除任务"""
+    """删除任务（需先清空作答记录）"""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM tasks WHERE id = :tid", {'tid': task_id})
@@ -85,6 +85,14 @@ def delete_task(task_id: int) -> dict:
         if row[0] not in ('draft', 'closed'):
             return {'success': False, 'message': '仅草稿或已关闭的任务可删除'}
 
+        # 检查是否存在作答记录
+        cursor.execute("SELECT COUNT(*) FROM responses WHERE task_id = :tid", {'tid': task_id})
+        if cursor.fetchone()[0] > 0:
+            return {'success': False, 'message': '该任务存在学生作答记录，请先在学生端删除作答后再删除任务'}
+
+        # 删任务-案例关联
+        cursor.execute("DELETE FROM task_cases WHERE task_id = :tid", {'tid': task_id})
+        # 删任务
         cursor.execute("DELETE FROM tasks WHERE id = :tid", {'tid': task_id})
         conn.commit()
         return {'success': True, 'message': '任务已删除'}

@@ -577,4 +577,3 @@ DB_PATH = os.path.join(mount_path, "survey.db")
 if __name__ == '__main__':
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
            , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
-    

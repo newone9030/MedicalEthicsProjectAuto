@@ -218,19 +218,86 @@ def delete_student_responses(task_id: int, student_id: int) -> dict:
         if row[0] != 'active':
             return {'success': False, 'message': '任务已关闭，无法删除作答'}
 
-        # 先删明细，再删主记录
+        return _do_delete_responses(cursor, task_id, student_id, conn)
+
+
+def admin_delete_student_responses(task_id: int, student_id: int) -> dict:
+    """管理员删除某个学生对某个任务的全部作答（不受任务状态限制）"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM tasks WHERE id = :tid", {'tid': task_id})
+        if not cursor.fetchone():
+            return {'success': False, 'message': '任务不存在'}
+        return _do_delete_responses(cursor, task_id, student_id, conn)
+
+
+def admin_delete_all_responses(task_id: int) -> dict:
+    """管理员删除某个任务的所有学生作答"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM tasks WHERE id = :tid", {'tid': task_id})
+        if not cursor.fetchone():
+            return {'success': False, 'message': '任务不存在'}
+
+        # 先删明细
         cursor.execute("""
             DELETE FROM response_details
             WHERE response_id IN (
-                SELECT id FROM responses
-                WHERE task_id = :tid AND student_id = :sid
+                SELECT id FROM responses WHERE task_id = :tid
             )
-        """, {'tid': task_id, 'sid': student_id})
+        """, {'tid': task_id})
 
+        # 再删主记录
         cursor.execute("""
-            DELETE FROM responses
-            WHERE task_id = :tid AND student_id = :sid
-        """, {'tid': task_id, 'sid': student_id})
+            DELETE FROM responses WHERE task_id = :tid
+        """, {'tid': task_id})
 
+        deleted = cursor.rowcount
         conn.commit()
-        return {'success': True, 'message': '作答已删除，可以重新作答'}
+        return {'success': True, 'message': f'已删除 {deleted} 条作答记录'}
+
+
+def _do_delete_responses(cursor, task_id: int, student_id: int, conn) -> dict:
+    """内部：删除指定学生的作答"""
+    cursor.execute("""
+        DELETE FROM response_details
+        WHERE response_id IN (
+            SELECT id FROM responses
+            WHERE task_id = :tid AND student_id = :sid
+        )
+    """, {'tid': task_id, 'sid': student_id})
+
+    cursor.execute("""
+        DELETE FROM responses
+        WHERE task_id = :tid AND student_id = :sid
+    """, {'tid': task_id, 'sid': student_id})
+
+    conn.commit()
+    return {'success': True, 'message': '作答已删除'}
+
+
+def get_task_response_summary(task_id: int) -> list:
+    """获取任务下所有学生的作答概况"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.id, u.username, u.real_name,
+                   COUNT(DISTINCT r.case_id) as submitted_count,
+                   (SELECT COUNT(*) FROM task_cases WHERE task_id = :tid) as total_cases
+            FROM users u
+            INNER JOIN responses r ON u.id = r.student_id AND r.status = 'submitted'
+            WHERE r.task_id = :tid
+            GROUP BY u.id, u.username, u.real_name
+            ORDER BY u.username
+        """, {'tid': task_id})
+
+        return [
+            {
+                'student_id': row[0],
+                'username': row[1],
+                'real_name': row[2] or row[1],
+                'submitted_count': row[3],
+                'total_cases': row[4],
+            }
+            for row in cursor.fetchall()
+        ]
