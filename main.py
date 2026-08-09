@@ -8,6 +8,9 @@ from app.config import TASK_STATUS, THEME_OPTIONS
 from app.db import test_connection, close_db
 from app.auth import login_view
 from app.case.case_service import get_case_count
+from app.task.task_service import get_background_task, get_task, get_active_task_for_student
+from app.response.response_service import is_background_completed
+from app.student.background_survey_view import build_background_survey_view
 from app.case.case_manager_view import build_case_list_view, build_case_editor_view
 from app.task.task_service import get_task_count, get_active_task_count, auto_update_task_statuses
 from app.task.task_manager_view import build_task_list_view, build_task_editor_view
@@ -39,8 +42,13 @@ def _navigate(page: ft.Page, target: str, **kwargs):
             print('[NAV] going to /admin/dashboard')
             page.go('/admin/dashboard')
         else:
-            print('[NAV] going to /student/dashboard')
-            page.go('/student/dashboard')
+            # 学生需先通过知情同意确认
+            if page.session.store.get('student_consented'):
+                print('[NAV] going to /student/dashboard')
+                page.go('/student/dashboard')
+            else:
+                print('[NAV] going to /student/consent')
+                page.go('/student/consent')
     else:
         # 将额外参数暂存到 session，供 route_change 使用
         page.session.store.set('_nav_params', kwargs)
@@ -101,6 +109,12 @@ def _build_view(route: str, page: ft.Page, **kwargs):
         return _build_account_management(page)
 
     # 学生视图
+    elif route == '/student/consent':
+        return _build_consent_page(page)
+
+    elif route == '/student/background':
+        return _build_background_page(page)
+
     elif route == '/student/dashboard':
         return _build_student_page(page)
 
@@ -402,6 +416,178 @@ def _build_account_management(page: ft.Page) -> ft.View:
 
 
 # ============================================
+# 学生知情同意页
+def _placeholder_view() -> ft.View:
+    """空过渡视图，用于 page.go() 重定向间隙显示"""
+    return ft.View(
+        route='/placeholder',
+        controls=[
+            ft.Container(
+                content=ft.ProgressRing(width=32, height=32, color='#1976D2'),
+                expand=True,
+                alignment=ft.Alignment(0, 0),
+                bgcolor='#F5F7FA',
+            ),
+        ],
+        padding=0,
+    )
+
+
+# ============================================
+def _build_consent_page(page: ft.Page) -> ft.View:
+    """学生知情同意页，必须勾选确认后才能进入系统"""
+
+    def on_logout(e):
+        _logout(page)
+
+    consent_checkbox = ft.Checkbox(
+        label='我已阅读上述说明，并愿意继续进入本研究系统',
+        value=False,
+        fill_color='#1976D2',
+        label_style=ft.TextStyle(size=14),
+    )
+
+    continue_btn = ft.ElevatedButton(
+        content='继续进入',
+        disabled=False,
+        icon=ft.Icons.ARROW_FORWARD,
+        style=ft.ButtonStyle(
+            bgcolor='#1976D2', color='white',
+            shape=ft.RoundedRectangleBorder(radius=8),
+        ),
+    )
+
+    def on_continue(e):
+        if not consent_checkbox.value:
+            snack = ft.SnackBar(
+                ft.Text('请先勾选"我已阅读上述说明"后再继续进入'),
+                bgcolor='#FF5252',
+            )
+            page.overlay.append(snack)
+            snack.open = True
+            page.update()
+            return
+        page.session.store.set('student_consented', True)
+        page.go('/student/dashboard')
+
+    continue_btn.on_click = on_continue
+
+    header = ft.Container(
+        content=ft.Row([
+            ft.Icon(ft.Icons.LOCAL_HOSPITAL, color='white', size=28),
+            ft.Text('医学生伦理调查研究系统', size=20, weight=ft.FontWeight.BOLD, color='white'),
+        ], spacing=10),
+        gradient=ft.LinearGradient(
+            begin=ft.Alignment.TOP_LEFT,
+            end=ft.Alignment.BOTTOM_RIGHT,
+            colors=['#1565C0', '#1976D2']
+        ),
+        padding=ft.Padding(24, 40, 24, 40),
+    )
+
+    content_card = ft.Container(
+        content=ft.Column([
+            ft.Text('研究知情同意书', size=20, weight=ft.FontWeight.BOLD, color='#1565C0'),
+            ft.Divider(height=16, color='#E0E0E0'),
+            ft.Text(
+                '您已接受研究人员提供的研究说明，并已知情同意参加本研究。\n\n'
+                '本系统仅用于研究资料采集和管理，研究结果将用于优化医患沟通相关课程教学。\n\n'
+                '非常感谢您参与本次研究！',
+                size=14, color='#424242',
+            ),
+            ft.Divider(height=24, color='transparent'),
+            consent_checkbox,
+            ft.Divider(height=20, color='transparent'),
+            ft.Row([
+                ft.OutlinedButton(
+                    content='退出登录',
+                    on_click=on_logout,
+                    icon=ft.Icons.LOGOUT,
+                    style=ft.ButtonStyle(color='#757575'),
+                ),
+                continue_btn,
+            ], alignment=ft.MainAxisAlignment.END, spacing=12),
+        ], spacing=0),
+        bgcolor='white',
+        border_radius=16,
+        padding=30,
+        shadow=ft.BoxShadow(spread_radius=1, blur_radius=20, color='#00000020'),
+    )
+
+    return ft.View(
+        route='/student/consent',
+        scroll=ft.ScrollMode.AUTO,
+        controls=[
+            ft.Container(
+                content=ft.Column([
+                    header,
+                    ft.Container(
+                        content=content_card,
+                        padding=ft.Padding(20, 30, 20, 30),
+                    ),
+                ], spacing=0),
+                bgcolor='#F5F7FA',
+                expand=True,
+            ),
+        ],
+        padding=0,
+    )
+
+
+# ============================================
+# 学生背景资料问卷页
+# ============================================
+def _build_background_page(page: ft.Page) -> ft.View:
+    """背景资料问卷页，学生必须完成才能进入仪表盘"""
+
+    user = page.session.store.get('user') or {}
+
+    # 检查是否有背景资料任务
+    bg_task = get_background_task()
+    if not bg_task:
+        # 无背景资料任务，直接跳转仪表盘
+        page.session.store.set('background_completed', True)
+        page.go('/student/dashboard')
+        return _placeholder_view()
+
+    task = get_task(bg_task['id'])
+    if not task or not task.get('cases'):
+        # 背景资料任务无案例，直接跳转
+        page.session.store.set('background_completed', True)
+        page.go('/student/dashboard')
+        return _placeholder_view()
+
+    # 检查是否已完成
+    if is_background_completed(bg_task['id'], user['id']):
+        page.session.store.set('background_completed', True)
+        page.go('/student/dashboard')
+        return _placeholder_view()
+
+    def go_dashboard():
+        # 检查是否真的完成了，兜底
+        if not is_background_completed(bg_task['id'], user['id']):
+            page.session.store.set('background_completed', False)
+            page.update()
+            page.go('/student/background')
+            return
+        page.session.store.set('background_completed', True)
+        page.update()
+        page.go('/student/dashboard')
+
+    def do_logout():
+        _logout(page)
+
+    return build_background_survey_view(
+        page=page,
+        on_navigate_dashboard=go_dashboard,
+        on_logout=do_logout,
+        student_id=user.get('id'),
+        student_name=user.get('real_name') or user.get('username', ''),
+        task=task,
+    )
+
+
+# ============================================
 # 学生仪表盘
 # ============================================
 def _build_student_page(page: ft.Page) -> ft.View:
@@ -523,11 +709,26 @@ def main(page: ft.Page):
         if not route or route == '/':
             route = '/login'
 
-        # 已登录用户不能通过浏览器返回键回到登录页，重定向到 dashboard
+        # 已登录用户不能通过浏览器返回键回到登录页，重定向到 dashboard 或知情同意页
         user = page.session.store.get('user')
         if route == '/login' and user:
             print('[ROUTE] 已登录用户尝试访问 /login，重定向到 dashboard')
-            route = '/admin/dashboard' if user['role'] == 'admin' else '/student/dashboard'
+            if user['role'] == 'admin':
+                route = '/admin/dashboard'
+            elif page.session.store.get('student_consented'):
+                route = '/student/dashboard'
+            else:
+                route = '/student/consent'
+
+        # 学生已同意但未完成背景资料 → 重定向到背景资料页
+        if (route == '/student/dashboard' and user
+                and user['role'] == 'student'
+                and page.session.store.get('student_consented')
+                and not page.session.store.get('background_completed')):
+            bg_task = get_background_task()
+            if bg_task and not is_background_completed(bg_task['id'], user['id']):
+                print('[ROUTE] 背景资料未完成，重定向到 /student/background')
+                route = '/student/background'
 
         page.views.clear()
         try:
@@ -551,10 +752,13 @@ def main(page: ft.Page):
 
     page.on_route_change = route_change
 
-    # 阻止从 dashboard 通过返回手势回退到登录页
+    # 阻止从 dashboard / 知情同意页 / 背景资料页通过返回手势回退到登录页
     def view_pop(e: ft.ViewPopEvent):
         if len(page.views) <= 1:
             return  # 没有可弹出的视图，阻止默认行为
+        current_route = page.views[-1].route if page.views else ''
+        if current_route in ('/student/consent', '/student/background'):
+            return  # 阻止从关键页面通过返回键跳过
         page.views.pop()
         page.update()
 
@@ -575,5 +779,6 @@ mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 DB_PATH = os.path.join(mount_path, "survey.db")
 
 if __name__ == '__main__':
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
-           , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+   ## ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
+    ##       , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER)

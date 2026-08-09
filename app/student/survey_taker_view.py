@@ -369,21 +369,46 @@ def _build_question_widget(question: dict, key_prefix: str, answers: dict, reado
     type_labels = {'single_choice': '单选题', 'multiple_choice': '多选题', 'open': '开放题'}
     type_label = type_labels.get(qtype, qtype)
 
-    return ft.Container(
-        content=ft.Column([
-            ft.Row([
+    # 构建 column 子控件列表
+    column_controls = []
+    column_controls.append(
+        ft.Row([
+            ft.Container(
+                content=ft.Text(type_label, size=11, color='white'),
+                bgcolor='#1976D2', border_radius=10,
+                padding=ft.Padding(8, 2, 8, 2),
+            ),
+            ft.Container(width=8, height=8, border_radius=4, bgcolor='#FF5252' if is_unanswered else 'transparent'),
+        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+    )
+    column_controls.append(ft.Divider(height=4, color='transparent'))
+    column_controls.append(ft.Text(question['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121'))
+
+    hint = (question.get('hint') or '').strip()
+    if hint:
+        hint_lines = [l.strip() for l in hint.split('\n') if l.strip()]
+        if hint_lines:
+            column_controls.append(
                 ft.Container(
-                    content=ft.Text(type_label, size=11, color='white'),
-                    bgcolor='#1976D2', border_radius=10,
-                    padding=ft.Padding(8, 2, 8, 2),
-                ),
-                ft.Container(width=8, height=8, border_radius=4, bgcolor='#FF5252' if is_unanswered else 'transparent'),
-            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Divider(height=4, color='transparent'),
-            ft.Text(question['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121'),
-            ft.Divider(height=8, color='transparent'),
-            content,
-        ], spacing=0),
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.Icons.LIGHTBULB_OUTLINE, size=14, color='#FF8F00'),
+                            ft.Text('作答提示', size=12, color='#FF8F00', weight=ft.FontWeight.W_600),
+                        ], spacing=4),
+                        *[ft.Text(f'{i}. {line}', size=12, color='#FF8F00', italic=True)
+                          for i, line in enumerate(hint_lines, 1)],
+                    ], spacing=2),
+                    bgcolor='#FFF8E1',
+                    border_radius=8,
+                    padding=ft.Padding(10, 8, 10, 8),
+                )
+            )
+
+    column_controls.append(ft.Divider(height=8, color='transparent'))
+    column_controls.append(content)
+
+    return ft.Container(
+        content=ft.Column(column_controls, spacing=0),
         bgcolor='#FAFAFA',
         border_radius=10,
         border=ft.Border.all(width=1, color=border_color),

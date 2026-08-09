@@ -93,12 +93,14 @@ CREATE TABLE case_questions (
     question_text   VARCHAR2(500) NOT NULL,
     question_type   VARCHAR2(20) NOT NULL CHECK (question_type IN ('single_choice', 'multiple_choice', 'open')),
     options         CLOB,
+    hint            VARCHAR2(500),
     sort_order      NUMBER DEFAULT 0
 );
 
 COMMENT ON TABLE case_questions IS '案例题目表';
 COMMENT ON COLUMN case_questions.question_type IS '题型: single_choice-单选, multiple_choice-多选, open-开放式文本题';
 COMMENT ON COLUMN case_questions.options IS '选项JSON, 格式: ["选项A","选项B","选项C"]';
+COMMENT ON COLUMN case_questions.hint IS '作答提示，管理员维护，可为空';
 
 CREATE SEQUENCE seq_case_questions START WITH 1 INCREMENT BY 1 NOCACHE;
 
@@ -122,12 +124,14 @@ CREATE TABLE tasks (
     start_time      TIMESTAMP NOT NULL,
     end_time        TIMESTAMP NOT NULL,
     status          VARCHAR2(20) DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'active', 'closed')),
+    task_type       VARCHAR2(20) DEFAULT 'survey' CHECK (task_type IN ('survey', 'background')),
     created_by      NUMBER NOT NULL REFERENCES users(id),
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE tasks IS '调研任务表';
 COMMENT ON COLUMN tasks.status IS '任务状态: draft-草稿, published-已发布(待开始), active-进行中, closed-已关闭';
+COMMENT ON COLUMN tasks.task_type IS '任务类型: survey-普通调查, background-背景资料问卷';
 
 CREATE SEQUENCE seq_tasks START WITH 1 INCREMENT BY 1 NOCACHE;
 

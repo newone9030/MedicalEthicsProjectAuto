@@ -227,7 +227,7 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
             result = add_question(case_id, '', 'single_choice', options=['选项A'], sort_order=len(questions))
             if result['success']:
                 new_q = {'id': result['question_id'], 'case_id': case_id, 'question_text': '', 
-                         'question_type': 'single_choice', 'options': ['选项A'], 'sort_order': len(questions), 'is_new': False}
+                         'question_type': 'single_choice', 'options': ['选项A'], 'sort_order': len(questions), 'is_new': False, 'hint': ''}
                 questions.append(new_q)
                 question_container.controls.append(_build_question_card(new_q, len(questions) - 1, refresh_questions, questions, refresh_single_question))
                 if question_container.page:
@@ -242,6 +242,7 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                 'options': ['选项A'],
                 'sort_order': len(questions),
                 'is_new': True,
+                'hint': '',
             }
             questions.append(new_q)
             question_container.controls.append(_build_question_card(new_q, len(questions) - 1, refresh_questions, questions, refresh_single_question))
@@ -251,7 +252,7 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
     def _read_question_from_ui(card) -> dict:
         """从题目的 UI 卡片控件中读取实际值
         
-        UI 结构: Container.content = Column(controls=[Row(badge), Row(title+type), Divider, options_col])
+        UI 结构: Container.content = Column(controls=[Row(badge), Row(title+type), Divider, options_col, Divider, hint_field])
         """
         card_col = card.content
         if not isinstance(card_col, ft.Column) or len(card_col.controls) < 2:
@@ -274,7 +275,13 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         opt_field = opt_ctrl.controls[0]
                         if isinstance(opt_field, ft.TextField):
                             opts.append((opt_field.value or '').strip())
-        return {'title': title_val, 'type': type_val, 'options': opts}
+        # Find hint field (key='hint_field')
+        hint_val = ''
+        for ctrl in card_col.controls:
+            if isinstance(ctrl, ft.TextField) and hasattr(ctrl, 'key') and ctrl.key == 'hint_field':
+                hint_val = (ctrl.value or '').strip()
+                break
+        return {'title': title_val, 'type': type_val, 'options': opts, 'hint': hint_val}
 
     def _show_sn(msg: str, success: bool = True):
         snack = ft.SnackBar(ft.Text(msg), bgcolor='#4CAF50' if success else '#FF5252')
@@ -312,17 +319,18 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         new_title = q_data['title']
                         new_type = q_data['type']
                         new_options = q_data['options'] if q_data['options'] else None
+                        new_hint = q_data.get('hint', '') or None
 
                         if q.get('is_new', False):
                             # 新增的题目：先插入数据库
                             add_result = add_question(case_id, new_title, new_type,
-                                                      options=new_options, sort_order=idx)
+                                                      options=new_options, sort_order=idx, hint=new_hint)
                             if add_result['success']:
                                 q['id'] = add_result['question_id']
                                 q['is_new'] = False
                         else:
                             # 已有的题目：直接更新
-                            update_question(q['id'], new_title, new_type, options=new_options)
+                            update_question(q['id'], new_title, new_type, options=new_options, hint=new_hint)
             else:
                 user = page.session.store.get('user')
                 result = create_case(title, '', '', user['id'])
@@ -334,7 +342,8 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         q_data = _read_question_from_ui(card)
                         if q_data and q_data['title']:
                             add_question(new_case_id, q_data['title'], q_data['type'], 
-                                        options=q_data['options'] if q_data['options'] else [], sort_order=idx)
+                                        options=q_data['options'] if q_data['options'] else [],
+                                        sort_order=idx, hint=q_data.get('hint', '') or None)
 
             if result['success']:
                 # 将成功消息存入 session，由列表页读取并显示
@@ -503,6 +512,17 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
 
     build_options()
 
+    hint_field = ft.TextField(
+        value=question.get('hint', ''),
+        label='作答提示（选填）',
+        hint_text='为作答者提供提示信息',
+        border_color='#E0E0E0',
+        focused_border_color='#1976D2',
+        text_style=ft.TextStyle(size=12),
+        dense=True,
+        key='hint_field',
+    )
+
     delete_btn = ft.IconButton(
         icon=ft.Icons.DELETE,
         icon_color='#FF5252',
@@ -524,6 +544,8 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
             ft.Row([question_text_field, type_dropdown], spacing=10),
             ft.Divider(height=5, color='transparent'),
             options_column,
+            ft.Divider(height=5, color='transparent'),
+            hint_field,
         ], spacing=6),
         bgcolor='#FAFAFA',
         border_radius=10,
@@ -537,17 +559,19 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
 def _on_question_text_change(question_id: int, new_text: str, temp_questions=None):
     """题目文本变更"""
     if question_id > 0:
-        # 从 temp_questions 获取原题目的 question_type 和 options，避免覆盖为 NULL
+        # 从 temp_questions 获取原题目的 question_type、options 和 hint，避免覆盖为 NULL
         qtype = None
         qopts = None
+        qhint = None
         if temp_questions:
             for q in temp_questions:
                 if q['id'] == question_id:
                     qtype = q.get('question_type')
                     qopts = q.get('options')
+                    qhint = q.get('hint')
                     q['question_text'] = new_text
                     break
-        update_question(question_id, new_text, qtype, qopts)
+        update_question(question_id, new_text, qtype, qopts, hint=qhint)
     else:
         # 新建模式，只更新内存中的题目列表
         if temp_questions:
@@ -563,7 +587,7 @@ def _on_question_type_change(question_id: int, new_type: str, question_index: in
     if question_id > 0:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT question_text, options FROM case_questions WHERE id = :qid", {'qid': question_id})
+            cursor.execute("SELECT question_text, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
             row = cursor.fetchone()
             if row:
                 if new_type == 'single_choice':
@@ -572,7 +596,7 @@ def _on_question_type_change(question_id: int, new_type: str, question_index: in
                     opts = ['选项A', '选项B']
                 else:
                     opts = None
-                update_question(question_id, row[0], new_type, options=opts)
+                update_question(question_id, row[0], new_type, options=opts, hint=row[2])
         # 更新内存中的题目数据
         for q in temp_questions:
             if q['id'] == question_id:
@@ -605,13 +629,13 @@ def _on_option_change(question_id: int, option_idx: int, new_value: str, temp_qu
     if question_id > 0:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT question_text, question_type, options FROM case_questions WHERE id = :qid", {'qid': question_id})
+            cursor.execute("SELECT question_text, question_type, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
             row = cursor.fetchone()
             if row and row[2]:
                 opts = json.loads(row[2])
                 if option_idx < len(opts):
                     opts[option_idx] = new_value
-                    update_question(question_id, row[0], row[1], options=opts)
+                    update_question(question_id, row[0], row[1], options=opts, hint=row[3])
     # 无论新建还是编辑模式，都要更新内存中的题目列表
     if temp_questions:
         for q in temp_questions:
@@ -628,12 +652,12 @@ def _add_option(question_id: int, on_refresh, temp_questions=None):
     if question_id > 0:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT question_text, question_type, options FROM case_questions WHERE id = :qid", {'qid': question_id})
+            cursor.execute("SELECT question_text, question_type, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
             row = cursor.fetchone()
             if row:
                 opts = json.loads(row[2]) if row[2] else []
                 opts.append(f'选项{chr(65 + len(opts))}')  # 选项A, B, C...
-                update_question(question_id, row[0], row[1], options=opts)
+                update_question(question_id, row[0], row[1], options=opts, hint=row[3])
     elif temp_questions:
         # 新建模式：更新临时 questions 列表
         for q in temp_questions:
@@ -650,13 +674,13 @@ def _remove_option(question_id: int, option_idx: int, on_refresh, temp_questions
     if question_id > 0:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT question_text, question_type, options FROM case_questions WHERE id = :qid", {'qid': question_id})
+            cursor.execute("SELECT question_text, question_type, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
             row = cursor.fetchone()
             if row and row[2]:
                 opts = json.loads(row[2])
                 if option_idx < len(opts):
                     opts.pop(option_idx)
-                    update_question(question_id, row[0], row[1], options=opts)
+                    update_question(question_id, row[0], row[1], options=opts, hint=row[3])
     elif temp_questions:
         for q in temp_questions:
             if q['id'] == question_id:

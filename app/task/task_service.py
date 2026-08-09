@@ -7,7 +7,7 @@ from app.db import get_connection
 
 
 def create_task(name: str, description: str, start_time: datetime, end_time: datetime,
-                case_ids: list, created_by: int) -> dict:
+                case_ids: list, created_by: int, task_type: str = 'survey') -> dict:
     """创建任务"""
     if not name:
         return {'success': False, 'message': '任务名称不能为空'}
@@ -20,11 +20,11 @@ def create_task(name: str, description: str, start_time: datetime, end_time: dat
         cursor = conn.cursor()
 
         cursor.execute("""
-            INSERT INTO tasks (name, description, start_time, end_time, status, created_by)
-            VALUES (:name, :desc, :stime, :etime, 'draft', :cby)
+            INSERT INTO tasks (name, description, start_time, end_time, status, task_type, created_by)
+            VALUES (:name, :desc, :stime, :etime, 'draft', :ttype, :cby)
         """, {
             'name': name, 'desc': description,
-            'stime': start_time, 'etime': end_time, 'cby': created_by
+            'stime': start_time, 'etime': end_time, 'ttype': task_type, 'cby': created_by
         })
 
         task_id = cursor.lastrowid
@@ -164,7 +164,7 @@ def get_task(task_id: int) -> dict:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, name, description, start_time, end_time, status, created_by, created_at
+            SELECT id, name, description, start_time, end_time, status, COALESCE(task_type, 'survey'), created_by, created_at
             FROM tasks WHERE id = :tid
         """, {'tid': task_id})
         row = cursor.fetchone()
@@ -174,7 +174,7 @@ def get_task(task_id: int) -> dict:
         task = {
             'id': row[0], 'name': row[1], 'description': row[2],
             'start_time': row[3], 'end_time': row[4], 'status': row[5],
-            'created_by': row[6], 'created_at': row[7],
+            'task_type': row[6], 'created_by': row[7], 'created_at': row[8],
             'cases': []
         }
 
@@ -208,7 +208,7 @@ def get_task_status_display(task: dict) -> str:
     return 'published'
 
 
-def list_tasks(status_filter: str = '', search: str = '') -> list:
+def list_tasks(status_filter: str = '', search: str = '', task_type: str = '') -> list:
     """获取任务列表"""
     auto_update_task_statuses()
 
@@ -217,6 +217,7 @@ def list_tasks(status_filter: str = '', search: str = '') -> list:
 
         sql = """
             SELECT t.id, t.name, t.description, t.start_time, t.end_time, t.status, t.created_at,
+                   COALESCE(t.task_type, 'survey') as task_type,
                    (SELECT COUNT(*) FROM task_cases WHERE task_id = t.id) as case_count
             FROM tasks t WHERE 1=1
         """
@@ -225,6 +226,10 @@ def list_tasks(status_filter: str = '', search: str = '') -> list:
         if status_filter:
             sql += " AND t.status = :status"
             params['status'] = status_filter
+
+        if task_type:
+            sql += " AND COALESCE(t.task_type, 'survey') = :ttype"
+            params['ttype'] = task_type
 
         if search:
             sql += " AND (t.name LIKE :search OR t.description LIKE :search2)"
@@ -239,7 +244,7 @@ def list_tasks(status_filter: str = '', search: str = '') -> list:
             tasks.append({
                 'id': row[0], 'name': row[1], 'description': row[2],
                 'start_time': row[3], 'end_time': row[4], 'status': row[5],
-                'created_at': row[6], 'case_count': row[7]
+                'created_at': row[6], 'task_type': row[7], 'case_count': row[8]
             })
         return tasks
 
@@ -261,6 +266,7 @@ def get_active_task_for_student(student_id: int) -> dict:
             FROM tasks t
             WHERE t.status = 'active'
               AND t.end_time >= :now
+              AND COALESCE(t.task_type, 'survey') != 'background'
             ORDER BY t.start_time ASC
         """, {'now': now})
 
@@ -309,3 +315,41 @@ def get_active_task_count() -> int:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM tasks WHERE status = 'active'")
         return cursor.fetchone()[0]
+
+
+def get_background_task() -> dict:
+    """获取背景资料问卷任务（全局唯一）"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id FROM tasks
+            WHERE COALESCE(task_type, 'survey') = 'background'
+            ORDER BY id DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return get_task(row[0])
+
+
+def set_task_background(task_id: int, is_background: bool = True) -> dict:
+    """将任务标记/取消为背景资料问卷"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # 检查任务是否存在
+        cursor.execute("SELECT id, name FROM tasks WHERE id = :tid", {'tid': task_id})
+        trow = cursor.fetchone()
+        if not trow:
+            return {'success': False, 'message': '任务不存在'}
+
+        if is_background:
+            # 先取消所有现有的背景资料标记
+            cursor.execute("UPDATE tasks SET task_type = 'survey' WHERE COALESCE(task_type, 'survey') = 'background'")
+            cursor.execute("UPDATE tasks SET task_type = 'background' WHERE id = :tid", {'tid': task_id})
+            conn.commit()
+            return {'success': True, 'message': f'已将「{trow[1]}」设为背景资料问卷'}
+        else:
+            cursor.execute("UPDATE tasks SET task_type = 'survey' WHERE id = :tid", {'tid': task_id})
+            conn.commit()
+            return {'success': True, 'message': f'已取消「{trow[1]}」的背景资料标记'}

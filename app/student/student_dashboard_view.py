@@ -5,8 +5,8 @@
 from datetime import datetime
 import threading
 import flet as ft
-from app.task.task_service import get_active_task_for_student
-from app.response.response_service import get_submission_status, delete_student_responses
+from app.task.task_service import get_active_task_for_student, get_background_task
+from app.response.response_service import get_submission_status, delete_student_responses, delete_background_survey_responses, is_background_completed
 
 
 def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
@@ -38,6 +38,14 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
             return
 
         task_container.controls.clear()
+
+        # ---- 背景资料卡片（已完成则显示） ----
+        bg_task = get_background_task()
+        if bg_task and is_background_completed(bg_task['id'], student_id):
+            task_container.controls.append(
+                _build_background_survey_card(bg_task, student_id, page, refresh_task)
+            )
+            task_container.controls.append(ft.Divider(height=15, color='transparent'))
 
         if not task:
             _build_empty_state(task_container)
@@ -83,7 +91,7 @@ def _build_empty_state(container: ft.Column):
             content=ft.Column([
                 ft.Icon(ft.Icons.INBOX, size=64, color='#BDBDBD'),
                 ft.Text('暂无可用任务', size=18, weight=ft.FontWeight.W_500, color='#757575'),
-                ft.Text('当前没有进行中的调查任务，请稍后查看', size=13, color='#BDBDBD'),
+                ft.Text('目前暂时没有开放中的任务，请联系系统管理员', size=13, color='#BDBDBD'),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
             padding=60,
             alignment=ft.Alignment.CENTER,
@@ -106,7 +114,13 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
                      on_refresh=None) -> ft.Container:
     """构建进行中任务卡片"""
     now = datetime.now()
-    remaining = task['end_time'] - now if hasattr(task['end_time'], '__sub__') else None
+    end_time = task.get('end_time')
+    if isinstance(end_time, str):
+        try:
+            end_time = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            end_time = None
+    remaining = end_time - now if isinstance(end_time, datetime) else None
 
     if remaining:
         days = remaining.days
@@ -276,6 +290,87 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
         padding=20,
         shadow=ft.BoxShadow(spread_radius=1, blur_radius=15, color='#00000015'),
         border=ft.Border.all(width=1, color='#E3F2FD'),
+    )
+
+
+def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
+                                  on_refresh: callable) -> ft.Container:
+    """构建背景资料卡片（已完成状态，可重新填写）"""
+
+    def show_restart_confirm(e):
+        page.overlay.append(confirm_dlg)
+        confirm_dlg.open = True
+        page.update()
+
+    def do_restart(e2):
+        _close_overlay_dlg(confirm_dlg)
+        result = delete_background_survey_responses(bg_task['id'], student_id)
+        if result['success']:
+            # 清除 session 中的背景资料完成标记
+            page.session.store.set('background_completed', False)
+            page.go('/student/background')
+        else:
+            snack = ft.SnackBar(ft.Text(result['message']), bgcolor='#FF5252')
+            page.overlay.append(snack)
+            snack.open = True
+            page.update()
+
+    confirm_dlg = ft.AlertDialog(
+        title=ft.Text('确认重新填写背景资料'),
+        content=ft.Text('删除背景资料作答后，之前填写的所有内容将丢失。\n\n确定要重新填写吗？'),
+        actions=[
+            ft.TextButton(content='取消', on_click=lambda e: _close_overlay_dlg(confirm_dlg)),
+            ft.ElevatedButton(content='确认删除', on_click=do_restart,
+                              style=ft.ButtonStyle(bgcolor='#FF5252', color='white')),
+        ],
+        modal=True,
+    )
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.ASSIGNMENT_IND, color='white', size=16),
+                        ft.Text('背景资料', size=14, color='white', weight=ft.FontWeight.W_600),
+                    ], spacing=6),
+                    bgcolor='#7B1FA2',
+                    border_radius=12,
+                    padding=ft.Padding(10, 4, 10, 4),
+                ),
+                ft.Container(expand=True),
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.CHECK_CIRCLE, color='white', size=16),
+                        ft.Text('已完成', size=12, color='white', weight=ft.FontWeight.W_600),
+                    ], spacing=4),
+                    bgcolor='#4CAF50',
+                    border_radius=12,
+                    padding=ft.Padding(10, 4, 10, 4),
+                ),
+            ]),
+            ft.Divider(height=12, color='transparent'),
+            ft.Text(bg_task.get('description', '')[:80] or bg_task.get('name', '背景资料任务'),
+                    size=12, color='#757575'),
+            ft.Divider(height=12, color='transparent'),
+            ft.Row([
+                ft.OutlinedButton(
+                    content='重新填写',
+                    icon=ft.Icons.REFRESH,
+                    on_click=show_restart_confirm,
+                    style=ft.ButtonStyle(
+                        color='#7B1FA2',
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                        side=ft.BorderSide(color='#7B1FA2', width=1),
+                    ),
+                ),
+            ], alignment=ft.MainAxisAlignment.END),
+        ], spacing=0),
+        bgcolor='white',
+        border_radius=16,
+        padding=20,
+        shadow=ft.BoxShadow(spread_radius=1, blur_radius=15, color='#00000015'),
+        border=ft.Border.all(width=1, color='#F3E5F5'),
     )
 
 

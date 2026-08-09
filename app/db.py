@@ -83,6 +83,7 @@ def _create_sqlite_tables(conn):
             question_text VARCHAR2(500) NOT NULL,
             question_type VARCHAR2(20) NOT NULL CHECK(question_type IN ('single_choice', 'multiple_choice', 'open')),
             options TEXT,
+            hint VARCHAR2(500),
             sort_order INTEGER DEFAULT 0
         );
 
@@ -93,6 +94,7 @@ def _create_sqlite_tables(conn):
             start_time TIMESTAMP,
             end_time TIMESTAMP,
             status VARCHAR2(20) DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'active', 'closed')),
+            task_type VARCHAR2(20) DEFAULT 'survey' CHECK(task_type IN ('survey', 'background')),
             created_by INTEGER REFERENCES users(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -123,6 +125,23 @@ def _create_sqlite_tables(conn):
         );
     """)
     conn.commit()
+
+    # 增量迁移：为旧表补充 task_type 字段
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(tasks)")
+    task_cols = [col[1] for col in cursor.fetchall()]
+    if 'task_type' not in task_cols:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN task_type VARCHAR2(20) DEFAULT 'survey'")
+        conn.commit()
+        print('[DB] 已添加 tasks.task_type 字段')
+
+    # 增量迁移：为旧表补充 hint 字段
+    cursor.execute("PRAGMA table_info(case_questions)")
+    q_cols = [col[1] for col in cursor.fetchall()]
+    if 'hint' not in q_cols:
+        cursor.execute("ALTER TABLE case_questions ADD COLUMN hint VARCHAR2(500)")
+        conn.commit()
+        print('[DB] 已添加 case_questions.hint 字段')
 
 
 def _init_oracle():

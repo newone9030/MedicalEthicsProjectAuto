@@ -7,7 +7,7 @@ import threading
 import flet as ft
 from app.task.task_service import (
     create_task, update_task, get_task, list_tasks,
-    publish_task, close_task, delete_task
+    publish_task, close_task, delete_task, set_task_background
 )
 from app.case.case_service import list_cases
 from app.response.response_service import (
@@ -131,6 +131,16 @@ def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Conta
                              on_click=lambda e, t=task: _show_response_manager(t, page, on_refresh)),
         )
 
+    # 背景资料标记（仅非草稿任务可操作）
+    if task['status'] != 'draft':
+        is_bg = task.get('task_type') == 'background'
+        bg_text = '取消背景资料' if is_bg else '设为背景资料'
+        bg_icon = ft.Icons.STAR if is_bg else ft.Icons.STAR_OUTLINE
+        menu_items.append(
+            ft.PopupMenuItem(content=bg_text, icon=bg_icon,
+                             on_click=lambda e, t=task, bg=is_bg: _do_toggle_background(t, bg, page, on_refresh)),
+        )
+
     if task['status'] == 'draft':
         menu_items.append(
             ft.PopupMenuItem(content='发布', icon=ft.Icons.PUBLISH,
@@ -151,18 +161,32 @@ def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Conta
                              on_click=lambda e, t=task: _do_delete(t, page, on_refresh)),
         )
 
+    # 背景资料徽章
+    bg_badge = None
+    if task.get('task_type') == 'background':
+        bg_badge = ft.Container(
+            content=ft.Text('背景资料', size=11, color='#E65100'),
+            bgcolor='#FFF3E0',
+            border_radius=10,
+            padding=ft.Padding(8, 2, 8, 2),
+        )
+
+    name_row_controls = [
+        ft.Text(task['name'], size=15, weight=ft.FontWeight.W_500, color='#212121'),
+        ft.Container(
+            content=ft.Text(label, size=11, color='white'),
+            bgcolor=color,
+            border_radius=10,
+            padding=ft.Padding(8, 2, 8, 2),
+        ),
+    ]
+    if bg_badge:
+        name_row_controls.append(bg_badge)
+
     return ft.Container(
         content=ft.Row([
             ft.Column([
-                ft.Row([
-                    ft.Text(task['name'], size=15, weight=ft.FontWeight.W_500, color='#212121'),
-                    ft.Container(
-                        content=ft.Text(label, size=11, color='white'),
-                        bgcolor=color,
-                        border_radius=10,
-                        padding=ft.Padding(8, 2, 8, 2),
-                    ),
-                ], spacing=8),
+                ft.Row(name_row_controls, spacing=8),
                 ft.Text(f'{task["case_count"]} 个案例 | {start_str} ~ {end_str}', size=12, color='#9E9E9E'),
             ], spacing=4, expand=True),
             ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, items=menu_items),
@@ -226,6 +250,17 @@ def _show_snack(page: ft.Page, result: dict):
     page.overlay.append(snack)
     snack.open = True
     page.update()
+
+
+def _do_toggle_background(task: dict, is_background: bool, page: ft.Page, on_refresh):
+    """切换任务背景资料标记"""
+    if is_background:
+        result = set_task_background(task['id'], False)
+    else:
+        result = set_task_background(task['id'], True)
+    _show_snack(page, result)
+    if result['success']:
+        on_refresh()
 
 
 def _show_response_manager(task: dict, page: ft.Page, on_refresh):

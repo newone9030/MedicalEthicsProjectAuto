@@ -74,9 +74,9 @@ def submit_response(task_id: int, case_id: int, student_id: int, answers: dict,
         if row and row[1] == 'submitted':
             return {'success': False, 'message': '您已提交过该案例'}
 
-        # 2. 校验时间窗口
+        # 2. 校验时间窗口（背景资料任务不校验）
         cursor.execute("""
-            SELECT start_time, end_time, status FROM tasks WHERE id = :tid
+            SELECT start_time, end_time, status, COALESCE(task_type, 'survey') as task_type FROM tasks WHERE id = :tid
         """, {'tid': task_id})
         task_row = cursor.fetchone()
         if not task_row:
@@ -85,8 +85,11 @@ def submit_response(task_id: int, case_id: int, student_id: int, answers: dict,
         now = datetime.now()
         start_time = task_row[0] if isinstance(task_row[0], datetime) else datetime.fromisoformat(task_row[0])
         end_time = task_row[1] if isinstance(task_row[1], datetime) else datetime.fromisoformat(task_row[1])
-        if task_row[2] != 'active' or now < start_time or now > end_time:
-            return {'success': False, 'message': '当前不在任务有效期内，无法提交'}
+        is_background = task_row[3] == 'background'
+
+        if not is_background:
+            if task_row[2] != 'active' or now < start_time or now > end_time:
+                return {'success': False, 'message': '当前不在任务有效期内，无法提交'}
 
         # 3. 完整性校验 - 所有题目必须作答
         unanswered = []
@@ -231,6 +234,16 @@ def admin_delete_student_responses(task_id: int, student_id: int) -> dict:
         return _do_delete_responses(cursor, task_id, student_id, conn)
 
 
+def delete_background_survey_responses(task_id: int, student_id: int) -> dict:
+    """学生删除自己的背景资料作答，允许重新填写（不受任务状态限制）"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM tasks WHERE id = :tid", {'tid': task_id})
+        if not cursor.fetchone():
+            return {'success': False, 'message': '任务不存在'}
+        return _do_delete_responses(cursor, task_id, student_id, conn)
+
+
 def admin_delete_all_responses(task_id: int) -> dict:
     """管理员删除某个任务的所有学生作答"""
     with get_connection() as conn:
@@ -301,3 +314,23 @@ def get_task_response_summary(task_id: int) -> list:
             }
             for row in cursor.fetchall()
         ]
+
+
+def is_background_completed(task_id: int, student_id: int) -> bool:
+    """检查学生是否已完成背景资料问卷的全部案例"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # 获取总案例数
+        cursor.execute("SELECT COUNT(*) FROM task_cases WHERE task_id = :tid", {'tid': task_id})
+        total = cursor.fetchone()[0]
+        if total == 0:
+            return True
+
+        # 获取已提交数
+        cursor.execute("""
+            SELECT COUNT(*) FROM responses
+            WHERE task_id = :tid AND student_id = :sid AND status = 'submitted'
+        """, {'tid': task_id, 'sid': student_id})
+        submitted = cursor.fetchone()[0]
+
+        return submitted >= total
