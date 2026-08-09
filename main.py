@@ -571,7 +571,9 @@ def main(page: ft.Page):
 
 
 import os
+DB_PATH = os.path.join("/data", "survey.db")
 
 if __name__ == '__main__':
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
-           , host='0.0.0.0')
+           , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+    
