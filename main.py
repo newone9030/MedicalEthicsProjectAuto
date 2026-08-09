@@ -571,7 +571,8 @@ def main(page: ft.Page):
 
 
 import os
-DB_PATH = os.path.join("/data", "survey.db")
+mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
+DB_PATH = os.path.join(mount_path, "survey.db")
 
 if __name__ == '__main__':
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
