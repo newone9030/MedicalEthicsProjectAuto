@@ -25,8 +25,8 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
                 ft.Container(
                     content=ft.Column([
                         ft.Icon(ft.Icons.ERROR_OUTLINE, size=64, color='#FF5252'),
-                        ft.Text('加载失败', size=18, weight=ft.FontWeight.W_500, color='#757575'),
-                        ft.Text(f'错误信息: {ex}', size=13, color='#BDBDBD'),
+                        ft.Text('加载失败', size=20, weight=ft.FontWeight.W_500, color='#757575'),
+                        ft.Text(f'错误信息: {ex}', size=15, color='#BDBDBD'),
                     ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
                     padding=60,
                     alignment=ft.Alignment.CENTER,
@@ -59,9 +59,6 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
             # 历史任务（已关闭的）
             _add_history_tasks(task_container, student_id, page, on_enter_task)
 
-            # 历史任务（已关闭的）
-            _add_history_tasks(task_container, student_id, page, on_enter_task)
-
         if task_container.page:
             task_container.update()
 
@@ -71,11 +68,11 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
     return [
         ft.Column([
             ft.Row([
-                ft.Text('我的任务', size=22, weight=ft.FontWeight.BOLD, color='#1565C0'),
+                ft.Text('我的任务', size=24, weight=ft.FontWeight.BOLD, color='#1565C0'),
                 ft.Container(
                     content=ft.Text(
                         f'{user.get("real_name") or user["username"]} | {user.get("class_name", "")}',
-                        size=13, color='#757575'
+                        size=15, color='#757575'
                     ),
                 ),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -90,8 +87,8 @@ def _build_empty_state(container: ft.Column):
         ft.Container(
             content=ft.Column([
                 ft.Icon(ft.Icons.INBOX, size=64, color='#BDBDBD'),
-                ft.Text('暂无可用任务', size=18, weight=ft.FontWeight.W_500, color='#757575'),
-                ft.Text('目前暂时没有开放中的任务，请联系系统管理员', size=13, color='#BDBDBD'),
+                ft.Text('暂无可用任务', size=20, weight=ft.FontWeight.W_500, color='#757575'),
+                ft.Text('目前暂时没有开放中的任务，请联系系统管理员', size=15, color='#BDBDBD'),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
             padding=60,
             alignment=ft.Alignment.CENTER,
@@ -121,8 +118,12 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
         except ValueError:
             end_time = None
     remaining = end_time - now if isinstance(end_time, datetime) else None
+    is_closed = remaining is not None and remaining.total_seconds() < 0
 
-    if remaining:
+    if is_closed:
+        remaining_str = '已关闭'
+        remaining_color = '#FF5252'
+    elif remaining:
         days = remaining.days
         hours = remaining.seconds // 3600
         mins = (remaining.seconds % 3600) // 60
@@ -164,7 +165,7 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
             ft.Container(
                 content=ft.Row([
                     ft.Container(width=6, height=6, border_radius=3, bgcolor=icon_color),
-                    ft.Text(case['title'][:10], size=11, color='#212121'),
+                    ft.Text(case['title'][:10], size=13, color='#212121'),
                 ], spacing=4),
                 bgcolor=chip_color,
                 border_radius=8,
@@ -220,21 +221,24 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
             ft.OutlinedButton(
                 content='重新作答',
                 icon=ft.Icons.REFRESH,
-                on_click=show_restart_confirm,
+                on_click=show_restart_confirm if not is_closed else None,
+                disabled=is_closed,
                 style=ft.ButtonStyle(
-                    color='#FF5252',
+                    color='#FF5252' if not is_closed else '#BDBDBD',
                     shape=ft.RoundedRectangleBorder(radius=8),
-                    side=ft.BorderSide(color='#FF5252', width=1),
+                    side=ft.BorderSide(color='#FF5252' if not is_closed else '#BDBDBD', width=1),
                 ),
             ),
         ], spacing=10)
     else:
         action_buttons = ft.ElevatedButton(
-            content='进入作答',
-            icon=ft.Icons.PLAY_ARROW,
-            on_click=lambda e: on_enter_task(task['id'], page),
+            content='进入作答' if not is_closed else '已关闭',
+            icon=ft.Icons.PLAY_ARROW if not is_closed else ft.Icons.LOCK,
+            on_click=lambda e: on_enter_task(task['id'], page) if not is_closed else None,
+            disabled=is_closed,
             style=ft.ButtonStyle(
-                bgcolor='#1976D2', color='white',
+                bgcolor='#1976D2' if not is_closed else '#BDBDBD',
+                color='white',
                 shape=ft.RoundedRectangleBorder(radius=8),
                 padding=ft.Padding(30, 12, 30, 12),
             ),
@@ -245,7 +249,7 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
         status_badge = ft.Container(
             content=ft.Row([
                 ft.Icon(ft.Icons.CHECK_CIRCLE, color='white', size=16),
-                ft.Text('已完成', size=12, color='white', weight=ft.FontWeight.W_600),
+                ft.Text('已完成', size=14, color='white', weight=ft.FontWeight.W_600),
             ], spacing=4),
             bgcolor='#4CAF50',
             border_radius=12,
@@ -254,14 +258,14 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
         progress_section = ft.Row([
             status_badge,
             ft.Container(expand=True),
-            ft.Text(f'{total} 个案例已全部提交', size=12, color='#757575'),
+            ft.Text(f'{total} 个案例已全部提交', size=14, color='#757575'),
         ])
     else:
         progress_section = ft.Column([
             ft.Row([
-                ft.Text(f'进度: {submitted_count}/{total} 已提交', size=12, color='#616161'),
+                ft.Text(f'进度: {submitted_count}/{total} 已提交', size=14, color='#616161'),
                 ft.Container(expand=True),
-                ft.Text(f'{draft_count} 草稿' if draft_count > 0 else '', size=12, color='#FF9800'),
+                ft.Text(f'{draft_count} 草稿' if draft_count > 0 else '', size=14, color='#FF9800'),
             ]),
             ft.ProgressBar(value=progress, bgcolor='#E0E0E0', color='#4CAF50', height=6),
         ], spacing=6)
@@ -270,12 +274,14 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
         content=ft.Column([
             ft.Row([
                 ft.Column([
-                    ft.Text(task['name'], size=18, weight=ft.FontWeight.BOLD, color='#212121'),
-                    ft.Text(task.get('description', '')[:80], size=12, color='#757575'),
+                    ft.Text(task['name'], size=20, weight=ft.FontWeight.BOLD, color='#212121',
+                            overflow=ft.TextOverflow.VISIBLE),
+                    ft.Text(task.get('description', '')[:80], size=14, color='#757575',
+                            overflow=ft.TextOverflow.VISIBLE),
                 ], spacing=2, expand=True),
                 ft.Column([
-                    ft.Text('截止倒计时', size=10, color='#9E9E9E'),
-                    ft.Text(remaining_str, size=18, weight=ft.FontWeight.BOLD, color=remaining_color),
+                    ft.Text('截止倒计时', size=12, color='#9E9E9E'),
+                    ft.Text(remaining_str, size=20, weight=ft.FontWeight.BOLD, color=remaining_color),
                 ], horizontal_alignment=ft.CrossAxisAlignment.END),
             ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.START),
             ft.Divider(height=10, color='transparent'),
@@ -332,7 +338,7 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
                 ft.Container(
                     content=ft.Row([
                         ft.Icon(ft.Icons.ASSIGNMENT_IND, color='white', size=16),
-                        ft.Text('背景资料', size=14, color='white', weight=ft.FontWeight.W_600),
+                        ft.Text('背景资料', size=16, color='white', weight=ft.FontWeight.W_600),
                     ], spacing=6),
                     bgcolor='#7B1FA2',
                     border_radius=12,
@@ -342,7 +348,7 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
                 ft.Container(
                     content=ft.Row([
                         ft.Icon(ft.Icons.CHECK_CIRCLE, color='white', size=16),
-                        ft.Text('已完成', size=12, color='white', weight=ft.FontWeight.W_600),
+                        ft.Text('已完成', size=14, color='white', weight=ft.FontWeight.W_600),
                     ], spacing=4),
                     bgcolor='#4CAF50',
                     border_radius=12,
@@ -351,7 +357,7 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
             ]),
             ft.Divider(height=12, color='transparent'),
             ft.Text(bg_task.get('description', '')[:80] or bg_task.get('name', '背景资料任务'),
-                    size=12, color='#757575'),
+                    size=14, color='#757575'),
             ft.Divider(height=12, color='transparent'),
             ft.Row([
                 ft.OutlinedButton(
@@ -428,8 +434,8 @@ def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_
             ft.Container(
                 content=ft.Row([
                     ft.Column([
-                        ft.Text(t['name'], size=13, weight=ft.FontWeight.W_500, color='#757575'),
-                        ft.Text(f'截止: {end_str} | 已提交 {submitted}/{len(statuses)} 个案例', size=11, color='#BDBDBD'),
+                        ft.Text(t['name'], size=15, weight=ft.FontWeight.W_500, color='#757575'),
+                        ft.Text(f'截止: {end_str} | 已提交 {submitted}/{len(statuses)} 个案例', size=13, color='#BDBDBD'),
                     ], spacing=2, expand=True),
                     ft.TextButton(content='查看', on_click=lambda e, tid=t['id']: on_enter_task(tid, page, readonly=True),
                                   style=ft.ButtonStyle(color='#1565C0')),

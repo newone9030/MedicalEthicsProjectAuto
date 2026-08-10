@@ -1,284 +1,454 @@
 """
-问卷作答视图
+问卷作答视图 - 逐题显示版本
+每页显示一道题目，支持"上一题"/"下一题"切换、逐题暂存、一次性提交全部
+页面控件先加载，数据通过 page.run_task 延迟加载
 """
-
 import json
 import flet as ft
 from app.task.task_service import get_task
 from app.case.question_service import get_questions_by_case
-from app.response.response_service import save_draft, submit_response, get_draft_answers, get_submitted_answers
+from app.response.response_service import save_draft, submit_response, get_draft_answers, get_submitted_answers, get_submission_status
 
 
 def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly: bool = False) -> list:
-    """问卷作答视图"""
+    """问卷作答视图 - 逐题显示，数据延迟加载"""
     user = page.session.store.get('user')
     student_id = user['id']
-    task = get_task(task_id)
 
-    if not task:
-        return [ft.Text('任务不存在', color='#FF5252')]
+    # ================================================================
+    # Phase 1: 立即构建 UI 骨架（不做任何 API 调用）
+    # ================================================================
 
-    cases = task['cases']
-    if not cases:
-        return [ft.Text('该任务没有关联案例', color='#FF5252')]
+    # 进度控件（骨架态）
+    progress_text = ft.Text('加载中...', size=15, color='#9E9E9E')
+    progress_bar = ft.ProgressBar(value=0, bgcolor='#E0E0E0', color='#1976D2', height=8)
 
-    current_case_idx = [0]  # 使用 list 作为可变 int 容器，避免 ft.Ref[int] 弱引用错误
+    # 案例/题目位置标签（骨架态）
+    case_label = ft.Text('正在加载...', size=15, color='#1976D2',
+                         overflow=ft.TextOverflow.VISIBLE)
 
-    # 收集所有题目和答案
-    all_questions_map = {}  # case_id -> [questions]
-    all_answers = {}  # key: "case_id_qid" or composite
-    not_submitted_case_ids = set()
-
-    # 加载所有案例的题目和暂存答案
-    for case in cases:
-        qs = get_questions_by_case(case['id'])
-        all_questions_map[case['id']] = qs
-
-        # 加载答案：只读模式加载已提交答案，否则加载暂存答案
-        if readonly:
-            saved = get_submitted_answers(task_id, case['id'], student_id)
-        else:
-            saved = get_draft_answers(task_id, case['id'], student_id)
-        for qid, ans in saved.items():
-            all_answers[f"{case['id']}_{qid}"] = ans
-
-        # 检查提交状态 - 只显示未提交的
-        from app.response.response_service import get_submission_status
-        statuses = get_submission_status(task_id, student_id)
-        if statuses.get(case['id']) != 'submitted':
-            not_submitted_case_ids.add(case['id'])
-
-    # 如果只读模式，所有案例都标记为已提交
-    if readonly:
-        not_submitted_case_ids.clear()
-
-    # 筛选未提交案例
-    active_cases = [c for c in cases if c['id'] in not_submitted_case_ids] if not readonly else cases
-
-    if not active_cases:
-        return [
-            ft.Column([
-                ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.Icons.CHECK_CIRCLE, size=64, color='#4CAF50'),
-                        ft.Text('所有案例已提交', size=20, weight=ft.FontWeight.BOLD, color='#4CAF50'),
-                        ft.TextButton('返回', on_click=lambda e: on_back() if on_back else None),
-                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
-                    padding=60,
-                    alignment=ft.Alignment.CENTER,
-                    expand=True,
-                )
-            ], expand=True),
-        ]
-
-    # --- 初始化第一个案例的数据 ---
-    first_case = active_cases[0]
-    first_questions = all_questions_map.get(first_case['id'], [])
-    initial_question_widgets = [
-        _build_question_widget(q, f"{first_case['id']}_{q['id']}", all_answers, readonly)
-        for q in first_questions
-    ]
-    is_single_case = len(active_cases) == 1
-
-    # --- UI 组件（带初始值，避免控件挂载前调用 refresh_ui）---
-    progress_bar = ft.ProgressBar(
-        value=(0 + 0.5) / len(active_cases) if first_questions else 0,
-        bgcolor='#E0E0E0', color='#1976D2', height=8,
+    # 题目容器 - 先显示加载动画
+    question_container = ft.Column([], spacing=0, expand=True,
+                                   scroll=ft.ScrollMode.AUTO)
+    question_container.controls.append(
+        ft.Container(
+            content=ft.Column([
+                ft.ProgressRing(width=40, height=40, color='#1976D2'),
+                ft.Text('正在加载题目数据...', size=14, color='#9E9E9E'),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12),
+            alignment=ft.Alignment(0, 0),
+            expand=True,
+        )
     )
-    case_title = ft.Text(
-        f'案例 1/{len(active_cases)}: {first_case["title"]}',
-        size=18, weight=ft.FontWeight.BOLD, color='#212121',
+
+    # 按钮控件（初始隐藏）
+    prev_btn = ft.ElevatedButton(
+        content='上一题',
+        icon=ft.Icons.ARROW_BACK,
+        visible=False,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
     )
-    question_area = ft.Column(
-        initial_question_widgets, spacing=16, scroll=ft.ScrollMode.AUTO, expand=True,
+    next_btn = ft.ElevatedButton(
+        content='下一题',
+        icon=ft.Icons.ARROW_FORWARD,
+        visible=False,
+        style=ft.ButtonStyle(bgcolor='#1976D2', color='white', shape=ft.RoundedRectangleBorder(radius=8)),
     )
-    if readonly:
-        prev_btn_visible, next_btn_visible, submit_btn_visible, save_draft_visible = \
-            False, (not is_single_case), False, False
-    else:
-        prev_btn_visible, next_btn_visible, submit_btn_visible, save_draft_visible = \
-            False, (not is_single_case), is_single_case, True
+    submit_all_btn = ft.ElevatedButton(
+        content='提交全部',
+        icon=ft.Icons.CHECK,
+        visible=False,
+        style=ft.ButtonStyle(bgcolor='#4CAF50', color='white', shape=ft.RoundedRectangleBorder(radius=8)),
+    )
+    save_btn = ft.OutlinedButton(
+        content='暂存',
+        icon=ft.Icons.SAVE_OUTLINED,
+        visible=False,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+    )
 
-    prev_btn = ft.ElevatedButton(content='上一案例', icon=ft.Icons.ARROW_BACK, visible=prev_btn_visible,
-                                  style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)))
-    next_btn = ft.ElevatedButton(content='下一案例', icon=ft.Icons.ARROW_FORWARD,
-                                  visible=next_btn_visible,
-                                  style=ft.ButtonStyle(bgcolor='#1976D2', color='white', shape=ft.RoundedRectangleBorder(radius=8)))
-    submit_btn = ft.ElevatedButton(content='提交全部案例', icon=ft.Icons.CHECK, visible=submit_btn_visible,
-                                    style=ft.ButtonStyle(bgcolor='#4CAF50', color='white', shape=ft.RoundedRectangleBorder(radius=8)))
-    save_draft_btn = ft.OutlinedButton(content='暂存', icon=ft.Icons.SAVE_OUTLINED,
-                                        visible=save_draft_visible,
-                                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)))
+    # 任务名标题（骨架态）
+    task_title_text = ft.Text('加载中...', size=22, weight=ft.FontWeight.BOLD, color='#1565C0',
+                              expand=True, overflow=ft.TextOverflow.ELLIPSIS)
 
-    def refresh_ui():
-        """刷新当前案例的题目显示"""
-        if current_case_idx[0] >= len(active_cases):
-            return
-        case = active_cases[current_case_idx[0]]
-        questions = all_questions_map.get(case['id'], [])
+    # 返回按钮
+    back_btn = ft.IconButton(
+        icon=ft.Icons.ARROW_BACK, icon_color='#1565C0',
+        on_click=lambda e: on_back() if on_back else None,
+    )
 
-        case_title.value = f'案例 {current_case_idx[0] + 1}/{len(active_cases)}: {case["title"]}'
-        progress_bar.value = (current_case_idx[0] + 0.5) / len(active_cases) if questions else 0
-
-        question_area.controls.clear()
-        for q in questions:
-            question_area.controls.append(_build_question_widget(q, f"{case['id']}_{q['id']}", all_answers, readonly))
-
-        # 按钮状态
-        prev_btn.visible = current_case_idx[0] > 0
-        is_last = current_case_idx[0] >= len(active_cases) - 1
-        next_btn.visible = not is_last
-        submit_btn.visible = is_last
-
-        if readonly:
-            save_draft_btn.visible = False
-            submit_btn.visible = False
-            next_btn.text = '下一案例'
-            next_btn.visible = not is_last
-
-        [c.update() for c in [case_title, progress_bar, question_area, prev_btn, next_btn, submit_btn, save_draft_btn]]
-
-    def go_prev(e):
-        if current_case_idx[0] > 0:
-            current_case_idx[0] -= 1
-            refresh_ui()
-
-    def go_next(e):
-        if current_case_idx[0] < len(active_cases) - 1:
-            current_case_idx[0] += 1
-            refresh_ui()
-
+    # SnackBar 辅助
     def _show_snack(msg: str, success: bool = True):
-        snack = ft.SnackBar(ft.Text(msg), bgcolor='#4CAF50' if success else '#FF5252')
+        snack = ft.SnackBar(ft.Text(msg, size=15), bgcolor='#4CAF50' if success else '#FF5252')
         page.overlay.append(snack)
         snack.open = True
         page.update()
 
     def _close_overlay_dlg(dialog):
-        ##page.overlay.remove(dialog)
         dialog.open = False
         page.update()
 
-    def handle_save_draft(e):
-        """暂存当前案例"""
-        case = active_cases[current_case_idx[0]]
-        case_answers = {}
-        for key, val in all_answers.items():
-            if key.startswith(f"{case['id']}_"):
-                qid_str = key.split('_', 1)[1]
-                try:
-                    qid = int(qid_str)
-                except ValueError:
-                    qid = qid_str
-                case_answers[qid] = val
+    # ================================================================
+    # Phase 2: 数据加载（通过 page.run_task 延迟执行）
+    # ================================================================
 
-        result = save_draft(task_id, case['id'], student_id, case_answers)
-        _show_snack(result['message'], result['success'])
+    async def init_data():
+        """异步加载所有数据并更新 UI"""
+        try:
+            task = get_task(task_id)
+            if not task:
+                question_container.controls.clear()
+                question_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.ERROR_OUTLINE, size=48, color='#FF5252'),
+                            ft.Text('任务不存在', size=18, color='#FF5252'),
+                            ft.TextButton(content=ft.Text('返回', size=16),
+                                          on_click=lambda e: on_back() if on_back else None),
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        alignment=ft.Alignment(0, 0),
+                        expand=True,
+                    )
+                )
+                progress_text.value = '任务不存在'
+                case_label.value = ''
+                page.update()
+                return
 
-    def handle_submit(e):
-        """一次性提交所有案例"""
-        # 1. 收集所有案例的答案，检查未完成项
-        all_cases_data = {}  # case_id -> {'answers': dict, 'qids': list}
-        all_unanswered = []  # [(case_title, question_text), ...]
+            task_title_text.value = task['name']
+            task_title_text.update()
 
-        for case in active_cases:
-            questions = all_questions_map.get(case['id'], [])
-            qids = [q['id'] for q in questions]
-            case_answers = {}
-            case_unanswered = []
-            for q in questions:
-                key = f"{case['id']}_{q['id']}"
-                ans = all_answers.get(key)
-                if ans is None or ans == '' or (isinstance(ans, list) and len(ans) == 0):
-                    case_unanswered.append((case['title'], q['question_text'][:30]))
+            cases = task['cases']
+            if not cases:
+                question_container.controls.clear()
+                question_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.WARNING_AMBER, size=48, color='#FF9800'),
+                            ft.Text('该任务没有关联案例', size=18, color='#FF9800'),
+                            ft.TextButton(content=ft.Text('返回', size=16),
+                                          on_click=lambda e: on_back() if on_back else None),
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        alignment=ft.Alignment(0, 0),
+                        expand=True,
+                    )
+                )
+                progress_text.value = '无关联案例'
+                case_label.value = ''
+                page.update()
+                return
+
+            # ---- 加载所有案例的题目和答案 ----
+            all_questions_map = {}
+            all_answers = {}
+            not_submitted_case_ids = set()
+
+            for case in cases:
+                qs = get_questions_by_case(case['id'])
+                all_questions_map[case['id']] = qs
+
+                if readonly:
+                    saved = get_submitted_answers(task_id, case['id'], student_id)
                 else:
-                    case_answers[q['id']] = ans
-            all_cases_data[case['id']] = {'answers': case_answers, 'qids': qids}
-            all_unanswered.extend(case_unanswered)
+                    saved = get_draft_answers(task_id, case['id'], student_id)
+                for qid, ans in saved.items():
+                    all_answers[f"{case['id']}_{qid}"] = ans
 
-        if all_unanswered:
-            # 显示所有未完成题目（按案例分组）
-            lines = []
-            for case_title, qtext in all_unanswered[:8]:
-                lines.append(f'• [{case_title}] {qtext}')
-            if len(all_unanswered) > 8:
-                lines.append(f'... 及其他 {len(all_unanswered) - 8} 题')
-            dlg = ft.AlertDialog(
-                title=ft.Text('请完成所有题目'),
-                content=ft.Text(f'以下 {len(all_unanswered)} 道题尚未作答：\n\n' + '\n'.join(lines)),
-                actions=[ft.TextButton('知道了', on_click=lambda e: _close_overlay_dlg(dlg))],
-                modal=True,
-            )
-            page.overlay.append(dlg)
-            dlg.open = True
-            page.update()
-            return
+                statuses = get_submission_status(task_id, student_id)
+                if statuses.get(case['id']) != 'submitted':
+                    not_submitted_case_ids.add(case['id'])
 
-        # 2. 确认提交对话框（一次性提交所有案例）
-        def do_submit_all(e2):
-            _close_overlay_dlg(confirm_dlg)
+            # 筛选显示的案例
+            active_cases = [c for c in cases if c['id'] in not_submitted_case_ids] if not readonly else cases
+            if readonly:
+                active_cases = cases
 
-            success_count = 0
+            if not active_cases:
+                question_container.controls.clear()
+                question_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.CHECK_CIRCLE, size=64, color='#4CAF50'),
+                            ft.Text('所有案例已提交', size=22, weight=ft.FontWeight.BOLD, color='#4CAF50'),
+                            ft.TextButton(content=ft.Text('返回', size=16),
+                                          on_click=lambda e: on_back() if on_back else None),
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        padding=60,
+                        alignment=ft.Alignment.CENTER,
+                        expand=True,
+                    )
+                )
+                progress_text.value = '全部已提交'
+                progress_bar.value = 1.0
+                case_label.value = ''
+                page.update()
+                return
+
+            # ---- 展平所有题目 ----
+            flat_questions = []
             for case in active_cases:
-                data = all_cases_data[case['id']]
-                result = submit_response(task_id, case['id'], student_id, data['answers'], data['qids'])
-                if result['success']:
-                    success_count += 1
-                    not_submitted_case_ids.discard(case['id'])
+                qs = all_questions_map.get(case['id'], [])
+                for qi, q in enumerate(qs):
+                    flat_questions.append((case, q, qi, len(qs)))
+
+            total_q_count = len(flat_questions)
+            current_idx = [0]
+
+            if total_q_count == 0:
+                question_container.controls.clear()
+                question_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.WARNING_AMBER, size=64, color='#FF9800'),
+                            ft.Text('暂无题目', size=22, weight=ft.FontWeight.BOLD, color='#FF9800'),
+                            ft.TextButton(content=ft.Text('返回', size=16),
+                                          on_click=lambda e: on_back() if on_back else None),
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        padding=60,
+                        alignment=ft.Alignment.CENTER,
+                        expand=True,
+                    )
+                )
+                progress_text.value = '暂无题目'
+                case_label.value = ''
+                page.update()
+                return
+
+            # ---- 内部函数：进度统计 ----
+            def count_completed():
+                return sum(1 for key, val in all_answers.items()
+                           if val is not None and val != '' and (not isinstance(val, list) or len(val) > 0))
+
+            def update_progress():
+                completed = count_completed()
+                progress_text.value = f'进度: {completed}/{total_q_count} 题已完成'
+                progress_bar.value = completed / total_q_count if total_q_count > 0 else 0
+                progress_text.update()
+                progress_bar.update()
+
+            # ---- 内部函数：获取案例序号 ----
+            def _case_order(target_case, case_list):
+                for i, c in enumerate(case_list):
+                    if c['id'] == target_case['id']:
+                        return i + 1
+                return 1
+
+            # ---- 刷新按钮可见性 ----
+            def _refresh_buttons():
+                if readonly:
+                    prev_btn.visible = current_idx[0] > 0
+                    next_btn.visible = current_idx[0] < total_q_count - 1
+                    save_btn.visible = False
+                    submit_all_btn.visible = False
                 else:
-                    _show_snack(f'案例「{case["title"]}」提交失败: {result["message"]}', False)
+                    is_first = current_idx[0] == 0
+                    is_last = current_idx[0] >= total_q_count - 1
+                    prev_btn.visible = not is_first
+                    next_btn.visible = not is_last
+                    save_btn.visible = True
+                    submit_all_btn.visible = is_last
+                prev_btn.update()
+                next_btn.update()
+                save_btn.update()
+                submit_all_btn.update()
 
-            if success_count == len(active_cases):
-                _show_snack(f'全部 {success_count} 个案例已提交完成！')
-                if on_back:
-                    on_back()
-            elif success_count > 0:
-                _show_snack(f'已提交 {success_count}/{len(active_cases)} 个案例，请重试失败的案例')
-                # 过滤已提交成功的案例，就地更新列表
-                active_cases[:] = [c for c in active_cases if c['id'] in not_submitted_case_ids]
-                if not active_cases:
-                    _show_snack('所有案例已提交完成！')
-                    if on_back:
-                        on_back()
+            # ---- 构建当前题目显示 ----
+            def build_question_content():
+                case, question, qi, qs_len = flat_questions[current_idx[0]]
+                num_in_task = current_idx[0] + 1
+
+                case_label.value = f'案例 {_case_order(case, active_cases)}/{len(active_cases)}: {case["title"]}  |  第 {qi + 1}/{qs_len} 题'
+                case_label.update()
+
+                question_container.controls.clear()
+                w = _build_question_widget(question, f"{case['id']}_{question['id']}", all_answers, readonly)
+                question_container.controls.append(w)
+                question_container.update()
+
+                _refresh_buttons()
+                update_progress()
+
+            # ---- 导航 ----
+            def go_prev(e):
+                if current_idx[0] > 0:
+                    current_idx[0] -= 1
+                    build_question_content()
+
+            def go_next(e):
+                if current_idx[0] < total_q_count - 1:
+                    current_idx[0] += 1
+                    build_question_content()
+
+            # ---- 暂存 ----
+            def handle_save_draft(e):
+                case, question, qi, qs_len = flat_questions[current_idx[0]]
+                case_id = case['id']
+
+                case_answers = {}
+                for key, val in all_answers.items():
+                    if key.startswith(f"{case_id}_"):
+                        qid_str = key.split('_', 1)[1]
+                        try:
+                            qid = int(qid_str)
+                        except ValueError:
+                            qid = qid_str
+                        case_answers[qid] = val
+
+                result = save_draft(task_id, case_id, student_id, case_answers)
+                _show_snack(result['message'], result['success'])
+                update_progress()
+
+            # ---- 提交全部 ----
+            def handle_submit(e):
+                all_cases_data = {}
+                all_unanswered = []
+
+                for case in active_cases:
+                    questions = all_questions_map.get(case['id'], [])
+                    qids = [q['id'] for q in questions]
+                    case_answers = {}
+                    case_unanswered = []
+                    for q in questions:
+                        key = f"{case['id']}_{q['id']}"
+                        ans = all_answers.get(key)
+                        if ans is None or ans == '' or (isinstance(ans, list) and len(ans) == 0):
+                            case_unanswered.append((case['title'], q['question_text'][:30]))
+                        else:
+                            case_answers[q['id']] = ans
+                    all_cases_data[case['id']] = {'answers': case_answers, 'qids': qids}
+                    all_unanswered.extend(case_unanswered)
+
+                if all_unanswered:
+                    lines = []
+                    for case_title, qtext in all_unanswered[:8]:
+                        lines.append(f'\u2022 [{case_title}] {qtext}')
+                    if len(all_unanswered) > 8:
+                        lines.append(f'... 及其他 {len(all_unanswered) - 8} 题')
+                    dlg = ft.AlertDialog(
+                        title=ft.Text('\u8BF7\u5B8C\u6210\u6240\u6709\u9898\u76EE', size=16),
+                        content=ft.Text(
+                            f'\u4EE5\u4E0B {len(all_unanswered)} \u9053\u9898\u5C1A\u672A\u4F5C\u7B54\uFF1A\n\n' + '\n'.join(lines),
+                            size=15),
+                        actions=[ft.TextButton(content=ft.Text('\u77E5\u9053\u4E86', size=15),
+                                                on_click=lambda e: _close_overlay_dlg(dlg))],
+                        modal=True,
+                    )
+                    page.overlay.append(dlg)
+                    dlg.open = True
+                    page.update()
                     return
-                if current_case_idx[0] >= len(active_cases):
-                    current_case_idx[0] = max(0, len(active_cases) - 1)
-                refresh_ui()
 
-        confirm_dlg = ft.AlertDialog(
-            title=ft.Text('确认提交全部案例'),
-            content=ft.Text(f'将一次性提交 {len(active_cases)} 个案例的所有作答，提交后将无法修改。\n\n确定要提交吗？'),
-            actions=[
-                ft.TextButton(content='取消', on_click=lambda e: _close_overlay_dlg(confirm_dlg)),
-                ft.ElevatedButton(content='确认提交全部', on_click=do_submit_all,
-                                  style=ft.ButtonStyle(bgcolor='#4CAF50', color='white')),
-            ],
-            modal=True,
-        )
-        page.overlay.append(confirm_dlg)
-        confirm_dlg.open = True
-        page.update()
+                def do_submit_all(e2):
+                    _close_overlay_dlg(self_check_dlg)
 
-    # 绑定按钮事件
-    prev_btn.on_click = go_prev
-    next_btn.on_click = go_next
-    submit_btn.on_click = handle_submit
-    save_draft_btn.on_click = handle_save_draft
+                    success_count = 0
+                    for case in active_cases:
+                        data = all_cases_data[case['id']]
+                        result = submit_response(task_id, case['id'], student_id, data['answers'], data['qids'])
+                        if result['success']:
+                            success_count += 1
+                            not_submitted_case_ids.discard(case['id'])
+                        else:
+                            _show_snack(f'\u6848\u4F8B\u300C{case["title"]}\u300D\u63D0\u4EA4\u5931\u8D25: {result["message"]}', False)
 
+                    if success_count == len(active_cases):
+                        _show_snack(f'\u5168\u90E8 {success_count} \u4E2A\u6848\u4F8B\u5DF2\u63D0\u4EA4\u5B8C\u6210\uFF01')
+                        if on_back:
+                            on_back()
+                    elif success_count > 0:
+                        _show_snack(f'\u5DF2\u63D0\u4EA4 {success_count}/{len(active_cases)} \u4E2A\u6848\u4F8B\uFF0C\u8BF7\u91CD\u8BD5\u5931\u8D25\u7684\u6848\u4F8B')
+
+                # 自检复选框
+                check1 = ft.Checkbox(label='\u6700\u91CD\u8981\u7684\u95EE\u9898\u53CA\u7406\u7531', value=False)
+                check2 = ft.Checkbox(label='\u76F8\u5173\u4EBA\u5458\u6216\u76F8\u5173\u65B9\u9762\u7684\u8003\u8651', value=False)
+                check3 = ft.Checkbox(label='\u4E0B\u4E00\u6B65\u7684\u505A\u6CD5\u548C\u7406\u7531', value=False)
+                check4 = ft.Checkbox(label='\u9700\u8981\u8865\u5145\u7684\u4FE1\u606F\u53CA\u5176\u5BF9\u5224\u65AD\u7684\u5F71\u54CD', value=False)
+
+                submit_btn = ft.ElevatedButton(
+                    content=ft.Text('\u7EE7\u7EED\u63D0\u4EA4', size=15),
+                    on_click=do_submit_all,
+                    disabled=True,
+                    style=ft.ButtonStyle(bgcolor='#4CAF50', color='white'),
+                )
+
+                def on_check_change(e):
+                    submit_btn.disabled = not (check1.value and check2.value and check3.value and check4.value)
+                    submit_btn.update()
+
+                check1.on_change = on_check_change
+                check2.on_change = on_check_change
+                check3.on_change = on_check_change
+                check4.on_change = on_check_change
+
+                self_check_dlg = ft.AlertDialog(
+                    title=ft.Text('\u63D0\u4EA4\u524D\uFF0C\u8BF7\u68C0\u67E5\u60A8\u7684\u56DE\u7B54\u662F\u5426\u5DF2\u5C3D\u53EF\u80FD\u5305\u542B\u4EE5\u4E0B\u5185\u5BB9\uFF1A', size=16),
+                    content=ft.Column(
+                        [check1, check2, check3, check4],
+                        spacing=10,
+                    ),
+                    actions=[
+                        ft.TextButton(content=ft.Text('\u8FD4\u56DE\u8865\u5145', size=15),
+                                      on_click=lambda e: _close_overlay_dlg(self_check_dlg)),
+                        submit_btn,
+                    ],
+                    modal=True,
+                )
+                page.overlay.append(self_check_dlg)
+                self_check_dlg.open = True
+                page.update()
+
+            # ---- 绑定按钮事件 ----
+            prev_btn.on_click = go_prev
+            next_btn.on_click = go_next
+            submit_all_btn.on_click = handle_submit
+            save_btn.on_click = handle_save_draft
+
+            # ---- 初始渲染 ----
+            build_question_content()
+
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            question_container.controls.clear()
+            question_container.controls.append(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.ERROR_OUTLINE, size=48, color='#FF5252'),
+                        ft.Text('加载失败', size=18, color='#FF5252'),
+                        ft.Text(str(ex), size=14, color='#9E9E9E'),
+                        ft.TextButton(content=ft.Text('返回', size=16),
+                                      on_click=lambda e: on_back() if on_back else None),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                    alignment=ft.Alignment(0, 0),
+                    expand=True,
+                )
+            )
+            progress_text.value = '加载失败'
+            case_label.value = ''
+            page.update()
+
+    # 调度数据加载任务（在控件挂载后执行）
+    page.run_task(init_data)
+
+    # ================================================================
+    # Phase 3: 立即返回 UI 骨架
+    # ================================================================
     return [
         ft.Column([
             ft.Row([
-                ft.IconButton(icon=ft.Icons.ARROW_BACK, icon_color='#1565C0',
-                              on_click=lambda e: on_back() if on_back else None),
-                ft.Text(task['name'], size=20, weight=ft.FontWeight.BOLD, color='#1565C0'),
+                back_btn,
+                task_title_text,
             ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Divider(height=10, color='transparent'),
             progress_bar,
-            ft.Divider(height=10, color='transparent'),
-            case_title,
+            ft.Row([
+                progress_text,
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Divider(height=8, color='transparent'),
+            case_label,
             ft.Divider(height=10, color='transparent'),
             ft.Container(
-                content=question_area,
+                content=question_container,
                 bgcolor='white',
                 border_radius=12,
                 padding=20,
@@ -287,21 +457,20 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
             ),
             ft.Divider(height=15, color='transparent'),
             ft.Row([
-                save_draft_btn,
+                save_btn,
                 ft.Container(expand=True),
                 prev_btn,
                 next_btn,
-                submit_btn,
+                submit_all_btn,
             ], spacing=10, alignment=ft.MainAxisAlignment.END),
         ], expand=True, spacing=0),
     ]
 
 
-def _build_question_widget(question: dict, key_prefix: str, answers: dict, readonly: bool) -> ft.Container:
+def _build_question_widget(question: dict, key: str, answers: dict, readonly: bool) -> ft.Container:
     """构建单个题目组件"""
     qid = question['id']
     qtype = question['question_type']
-    key = f"{key_prefix.split('_')[0]}_{qid}"
     current_val = answers.get(key)
 
     is_unanswered = not readonly and (
@@ -316,47 +485,73 @@ def _build_question_widget(question: dict, key_prefix: str, answers: dict, reado
     if qtype == 'single_choice':
         opts = question.get('options', [])
         if not opts:
-            content = ft.Text('(无选项)', size=13, color='#9E9E9E', italic=True)
+            content = ft.Text('(无选项)', size=15, color='#9E9E9E', italic=True)
         else:
-            radio = ft.RadioGroup(
-                value=current_val,
-                on_change=lambda e: on_answer_change(e.control.value),
-                content=ft.Column([
-                    ft.Radio(value=opt, label=opt, fill_color='#1976D2')
-                    for opt in opts
-                ], spacing=6),
-            )
-            if readonly:
-                radio.disabled = True
-            content = radio
+            radio_items = []
+            for opt in opts:
+                is_selected = current_val == opt
+                radio_items.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(
+                                ft.Icons.RADIO_BUTTON_CHECKED if is_selected else ft.Icons.RADIO_BUTTON_UNCHECKED,
+                                color='#1976D2' if is_selected else '#757575',
+                                size=20,
+                            ),
+                            ft.Text(opt, size=16, color='#212121',
+                                    overflow=ft.TextOverflow.VISIBLE, expand=True,
+                                    no_wrap=False),
+                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                        on_click=None if readonly else (lambda e, o=opt: _on_choice_select(o, key, answers)),
+                        padding=ft.Padding(8, 6, 8, 6),
+                        border_radius=8,
+                        bgcolor='#E3F2FD' if is_selected else None,
+                        data=opt,
+                    )
+                )
+            content = ft.Column(radio_items, spacing=4)
 
     elif qtype == 'multiple_choice':
         opts = question.get('options', [])
         if not opts:
-            content = ft.Text('(无选项)', size=13, color='#9E9E9E', italic=True)
+            content = ft.Text('(无选项)', size=15, color='#9E9E9E', italic=True)
         else:
             selected = current_val if isinstance(current_val, list) else []
-            checks = []
+            check_items = []
             for opt in opts:
-                cb = ft.Checkbox(
-                    label=opt, value=opt in selected,
-                    fill_color='#1976D2',
-                    on_change=lambda e, o=opt, s=selected: _toggle_checkbox(o, s, key, answers),
+                is_checked = opt in selected
+                check_items.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Checkbox(
+                                value=is_checked,
+                                fill_color='#1976D2',
+                                disabled=readonly,
+                                on_change=lambda e, o=opt: _on_check_toggle(o, key, answers),
+                            ),
+                            ft.Text(opt, size=16, color='#212121',
+                                    overflow=ft.TextOverflow.VISIBLE, expand=True,
+                                    no_wrap=False),
+                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                        padding=ft.Padding(4, 6, 4, 6),
+                        border_radius=8,
+                        bgcolor='#E3F2FD' if is_checked else None,
+                        on_click=None if readonly else (lambda e, o=opt: _on_check_toggle(o, key, answers)),
+                    )
                 )
-                if readonly:
-                    cb.disabled = True
-                checks.append(cb)
-            content = ft.Column(checks, spacing=4)
+            content = ft.Column(check_items, spacing=4)
 
     elif qtype == 'open':
         tf = ft.TextField(
             value=current_val or '',
             multiline=True,
-            min_lines=3,
-            max_lines=6,
+            min_lines=4,
+            max_lines=8,
             hint_text='请输入您的回答...',
             border_color='#BBDEFB',
             focused_border_color='#1976D2',
+            text_size=16,
+            expand=True,
             on_change=lambda e: on_answer_change(e.control.value),
         )
         if readonly:
@@ -364,25 +559,27 @@ def _build_question_widget(question: dict, key_prefix: str, answers: dict, reado
         content = tf
 
     else:
-        content = ft.Text(f'未知题型: {qtype}', color='#FF5252')
+        content = ft.Text(f'未知题型: {qtype}', color='#FF5252', size=15)
 
     type_labels = {'single_choice': '单选题', 'multiple_choice': '多选题', 'open': '开放题'}
     type_label = type_labels.get(qtype, qtype)
 
-    # 构建 column 子控件列表
     column_controls = []
     column_controls.append(
         ft.Row([
             ft.Container(
-                content=ft.Text(type_label, size=11, color='white'),
+                content=ft.Text(type_label, size=13, color='white'),
                 bgcolor='#1976D2', border_radius=10,
                 padding=ft.Padding(8, 2, 8, 2),
             ),
-            ft.Container(width=8, height=8, border_radius=4, bgcolor='#FF5252' if is_unanswered else 'transparent'),
+            ft.Container(width=8, height=8, border_radius=4,
+                         bgcolor='#FF5252' if is_unanswered else 'transparent'),
         ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
     )
-    column_controls.append(ft.Divider(height=4, color='transparent'))
-    column_controls.append(ft.Text(question['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121'))
+    column_controls.append(ft.Divider(height=8, color='transparent'))
+    column_controls.append(
+        ft.Text(question['question_text'], size=16, weight=ft.FontWeight.W_500, color='#212121',
+                overflow=ft.TextOverflow.VISIBLE))
 
     hint = (question.get('hint') or '').strip()
     if hint:
@@ -392,10 +589,12 @@ def _build_question_widget(question: dict, key_prefix: str, answers: dict, reado
                 ft.Container(
                     content=ft.Column([
                         ft.Row([
-                            ft.Icon(ft.Icons.LIGHTBULB_OUTLINE, size=14, color='#FF8F00'),
-                            ft.Text('作答提示', size=12, color='#FF8F00', weight=ft.FontWeight.W_600),
+                            ft.Icon(ft.Icons.LIGHTBULB_OUTLINE, size=16, color='#FF8F00'),
+                            ft.Text('作答提示', size=14, color='#FF8F00',
+                                    weight=ft.FontWeight.W_600),
                         ], spacing=4),
-                        *[ft.Text(f'{i}. {line}', size=12, color='#FF8F00', italic=True)
+                        *[ft.Text(f'{i}. {line}', size=14, color='#FF8F00', italic=True,
+                                  overflow=ft.TextOverflow.VISIBLE)
                           for i, line in enumerate(hint_lines, 1)],
                     ], spacing=2),
                     bgcolor='#FFF8E1',
@@ -404,7 +603,7 @@ def _build_question_widget(question: dict, key_prefix: str, answers: dict, reado
                 )
             )
 
-    column_controls.append(ft.Divider(height=8, color='transparent'))
+    column_controls.append(ft.Divider(height=12, color='transparent'))
     column_controls.append(content)
 
     return ft.Container(
@@ -416,9 +615,18 @@ def _build_question_widget(question: dict, key_prefix: str, answers: dict, reado
     )
 
 
-def _toggle_checkbox(option: str, selected: list, key: str, answers: dict):
+def _on_choice_select(option: str, key: str, answers: dict):
+    """单选：选择某个选项"""
+    answers[key] = option
+
+
+def _on_check_toggle(option: str, key: str, answers: dict):
+    """多选：切换某个选项的选中状态"""
+    selected: list = answers.get(key)
+    if not isinstance(selected, list):
+        selected = []
     if option in selected:
         selected.remove(option)
     else:
         selected.append(option)
-    answers[key] = selected[:]
+    answers[key] = selected

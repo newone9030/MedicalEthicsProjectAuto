@@ -3,6 +3,7 @@
 """
 
 import flet as ft
+import asyncio
 from app.auth.auth_service import login, register_user
 
 
@@ -269,6 +270,13 @@ def build_login_view(page: ft.Page) -> list:
         color='#9E9E9E',
         text_align=ft.TextAlign.CENTER,
     )
+
+    # 延迟刷新 SegmentedButton，修复首次加载时中文文字宽度计算不准确的问题
+    async def _fix_segmented_button():
+        await asyncio.sleep(0.05)
+        role_tabs.update()
+
+    page.run_task(_fix_segmented_button)
 
     return [
         ft.Container(

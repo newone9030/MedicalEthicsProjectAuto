@@ -444,7 +444,7 @@ def _build_consent_page(page: ft.Page) -> ft.View:
         label='我已阅读上述说明，并愿意继续进入本研究系统',
         value=False,
         fill_color='#1976D2',
-        label_style=ft.TextStyle(size=14),
+        label_style=ft.TextStyle(size=16),
     )
 
     continue_btn = ft.ElevatedButton(
@@ -475,7 +475,7 @@ def _build_consent_page(page: ft.Page) -> ft.View:
     header = ft.Container(
         content=ft.Row([
             ft.Icon(ft.Icons.LOCAL_HOSPITAL, color='white', size=28),
-            ft.Text('医学生伦理调查研究系统', size=20, weight=ft.FontWeight.BOLD, color='white'),
+            ft.Text('医学生伦理调查研究系统', size=22, weight=ft.FontWeight.BOLD, color='white'),
         ], spacing=10),
         gradient=ft.LinearGradient(
             begin=ft.Alignment.TOP_LEFT,
@@ -487,13 +487,13 @@ def _build_consent_page(page: ft.Page) -> ft.View:
 
     content_card = ft.Container(
         content=ft.Column([
-            ft.Text('研究知情同意书', size=20, weight=ft.FontWeight.BOLD, color='#1565C0'),
+            ft.Text('研究知情同意书', size=22, weight=ft.FontWeight.BOLD, color='#1565C0'),
             ft.Divider(height=16, color='#E0E0E0'),
             ft.Text(
                 '您已接受研究人员提供的研究说明，并已知情同意参加本研究。\n\n'
                 '本系统仅用于研究资料采集和管理，研究结果将用于优化医患沟通相关课程教学。\n\n'
                 '非常感谢您参与本次研究！',
-                size=14, color='#424242',
+                size=16, color='#424242',
             ),
             ft.Divider(height=24, color='transparent'),
             consent_checkbox,
@@ -564,12 +564,6 @@ def _build_background_page(page: ft.Page) -> ft.View:
         return _placeholder_view()
 
     def go_dashboard():
-        # 检查是否真的完成了，兜底
-        if not is_background_completed(bg_task['id'], user['id']):
-            page.session.store.set('background_completed', False)
-            page.update()
-            page.go('/student/background')
-            return
         page.session.store.set('background_completed', True)
         page.update()
         page.go('/student/dashboard')
@@ -603,11 +597,11 @@ def _build_student_page(page: ft.Page) -> ft.View:
         content=ft.Row([
             ft.Row([
                 ft.Icon(ft.Icons.LOCAL_HOSPITAL, color='white', size=22),
-                ft.Text('医学生伦理调研', size=15, weight=ft.FontWeight.BOLD, color='white',
+                ft.Text('医学生伦理调研', size=17, weight=ft.FontWeight.BOLD, color='white',
                         overflow=ft.TextOverflow.ELLIPSIS, no_wrap=True),
             ], spacing=8, expand=True),
             ft.Row([
-                ft.Text(f'{user.get("real_name") or user["username"]}', size=13,
+                ft.Text(f'{user.get("real_name") or user["username"]}', size=15,
                         color='rgba(255,255,255,0.9)', overflow=ft.TextOverflow.ELLIPSIS, no_wrap=True),
                 ft.IconButton(icon=ft.Icons.LOGOUT, icon_color='white', on_click=on_logout,
                              icon_size=20, tooltip='退出登录'),
