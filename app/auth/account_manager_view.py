@@ -36,6 +36,7 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
     def refresh_stats():
         students = get_student_list()
         active_count = sum(1 for s in students if s['status'] == 'active')
+        test_count = sum(1 for s in students if s.get('user_type') == 'test')
         stats_bar.controls = [
             ft.Container(
                 content=ft.Row([
@@ -64,6 +65,15 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
                 border_radius=8,
                 padding=ft.Padding(12, 6, 12, 6),
             ),
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.SCIENCE, color='#FF9800', size=20),
+                    ft.Text(f'测试用户: {test_count}', size=13, color='#424242', weight=ft.FontWeight.W_500),
+                ], spacing=6),
+                bgcolor='#FFF3E0',
+                border_radius=8,
+                padding=ft.Padding(12, 6, 12, 6),
+            ),
         ]
         if stats_bar.page:
             stats_bar.update()
@@ -76,6 +86,12 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
         student_id_display = f'学号: {s["student_id"]}' if s.get('student_id') else ''
         class_display = f'班级: {s["class_name"]}' if s.get('class_name') else ''
         real_name_display = s['real_name'] or '未设置姓名'
+        # 用户类型标签
+        user_type = s.get('user_type', 'formal')
+        is_test = user_type == 'test'
+        utype_label = '测试' if is_test else '正式'
+        utype_bg = '#FFF3E0' if is_test else '#E3F2FD'
+        utype_color = '#FF9800' if is_test else '#1565C0'
 
         info_parts = []
         if student_id_display:
@@ -99,6 +115,12 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
                     ft.Text(real_name_display, size=12, color='#616161'),
                     ft.Text(info_text, size=11, color='#9E9E9E') if info_text else ft.Text(''),
                 ], spacing=2, expand=True),
+                ft.Container(
+                    content=ft.Text(utype_label, size=12, color=utype_color, weight=ft.FontWeight.W_500),
+                    bgcolor=utype_bg,
+                    border_radius=12,
+                    padding=ft.Padding(12, 4, 12, 4),
+                ),
                 ft.Container(
                     content=ft.Text(status_text, size=12, color='white', weight=ft.FontWeight.W_500),
                     bgcolor=status_color,
@@ -186,6 +208,16 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
             border_color='#BBDEFB', focused_border_color='#1976D2',
             password=True, can_reveal_password=True,
         )
+        user_type_dropdown = ft.Dropdown(
+            label='用户类型',
+            options=[
+                ft.dropdown.Option('formal', '正式用户'),
+                ft.dropdown.Option('test', '测试用户'),
+            ],
+            value='formal',
+            border_color='#BBDEFB',
+            focused_border_color='#1976D2',
+        )
         create_error = ft.Text('', color='#FF5252', size=13)
 
         def cancel(e):
@@ -217,6 +249,7 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
                     password=password,
                     role='student',
                     student_id=student_id_val,
+                    user_type=user_type_dropdown.value or 'formal',
                     must_change_password=1
                 )
                 if result['success']:
@@ -239,6 +272,8 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
                 create_student_id,
                 ft.Divider(height=8, color='transparent'),
                 create_password,
+                ft.Divider(height=8, color='transparent'),
+                user_type_dropdown,
                 ft.Divider(height=4, color='transparent'),
                 create_error,
             ], tight=True, width=380),
@@ -352,6 +387,7 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
     # 初始统计栏
     students = get_student_list()
     active_count = sum(1 for s in students if s['status'] == 'active')
+    test_count = sum(1 for s in students if s.get('user_type') == 'test')
     stats_bar.controls = [
         ft.Container(
             content=ft.Row([
@@ -373,6 +409,13 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
                 ft.Text(f'禁用: {len(students) - active_count}', size=13, color='#424242', weight=ft.FontWeight.W_500),
             ], spacing=6),
             bgcolor='#FFEBEE', border_radius=8, padding=ft.Padding(12, 6, 12, 6),
+        ),
+        ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.SCIENCE, color='#FF9800', size=20),
+                ft.Text(f'测试用户: {test_count}', size=13, color='#424242', weight=ft.FontWeight.W_500),
+            ], spacing=6),
+            bgcolor='#FFF3E0', border_radius=8, padding=ft.Padding(12, 6, 12, 6),
         ),
     ]
 

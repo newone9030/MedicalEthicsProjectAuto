@@ -7,6 +7,7 @@ import threading
 import flet as ft
 from app.task.task_service import get_active_task_for_student, get_background_task
 from app.response.response_service import get_submission_status, delete_student_responses, delete_background_survey_responses, is_background_completed
+from app.student.feedback_service import has_feedback
 
 
 def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
@@ -58,6 +59,9 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
 
             # 历史任务（已关闭的）
             _add_history_tasks(task_container, student_id, page, on_enter_task)
+
+        # 测试用户反馈入口（无论活跃任务是否存在，检查条件）
+        _maybe_add_feedback_entry(task_container, page, student_id, user, task, bg_task)
 
         if task_container.page:
             task_container.update()
@@ -447,3 +451,80 @@ def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_
     container.controls.append(toggle_btn)
     container.controls.append(history_list)
     history_list.visible = False
+
+
+def _maybe_add_feedback_entry(container: ft.Column, page: ft.Page, student_id: int,
+                               user: dict, task: dict, bg_task: dict):
+    """
+    条件：测试用户 + 背景已完成 + 所有任务已提交 + 未提交反馈 → 显示反馈入口
+    """
+    if user.get('user_type') != 'test':
+        return
+    if not has_feedback(student_id):
+        # 检查背景是否完成
+        bg_completed = False
+        if bg_task:
+            bg_completed = is_background_completed(bg_task['id'], student_id)
+        else:
+            bg_completed = True  # 无背景任务视为已完成
+
+        if not bg_completed:
+            return
+
+        # 检查活跃任务
+        if task:
+            statuses = get_submission_status(task['id'], student_id)
+            all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
+            if not all_submitted:
+                return
+        # 如果没有活跃任务（可能任务已关闭），也显示入口
+
+        container.controls.append(ft.Divider(height=15, color='transparent'))
+        container.controls.append(_build_feedback_entry_card(page))
+
+
+def _build_feedback_entry_card(page: ft.Page) -> ft.Container:
+    """测试用户反馈入口卡片"""
+
+    def on_enter_feedback(e):
+        page.go('/student/feedback')
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.FEEDBACK, color='white', size=18),
+                        ft.Text('预测试最终反馈', size=18, color='white', weight=ft.FontWeight.W_600),
+                    ], spacing=8),
+                    bgcolor='#FF9800',
+                    border_radius=12,
+                    padding=ft.Padding(14, 6, 14, 6),
+                ),
+                ft.Container(expand=True),
+            ]),
+            ft.Divider(height=12, color='transparent'),
+            ft.Text(
+                '请根据您完成所有情境任务的实际体验，对系统的各个方面进行评价反馈。',
+                size=14, color='#616161',
+            ),
+            ft.Divider(height=12, color='transparent'),
+            ft.Row([
+                ft.Container(expand=True),
+                ft.ElevatedButton(
+                    content='进入反馈',
+                    icon=ft.Icons.FEEDBACK,
+                    on_click=on_enter_feedback,
+                    style=ft.ButtonStyle(
+                        bgcolor='#FF9800', color='white',
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+            ]),
+        ], spacing=0),
+        bgcolor='#FFF3E0',
+        border_radius=16,
+        padding=ft.Padding(20, 16, 20, 16),
+        shadow=ft.BoxShadow(spread_radius=1, blur_radius=15, color='#00000015'),
+        border=ft.border.all(width=1, color='#FFE0B2'),
+    )

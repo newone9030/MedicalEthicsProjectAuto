@@ -45,7 +45,8 @@ def generate_random_password(length: int = 6) -> str:
 
 def register_user(username: str, password: str, role: str = 'student',
                   real_name: str = None, class_name: str = None,
-                  student_id: str = None, must_change_password: int = 0) -> dict:
+                  student_id: str = None, user_type: str = 'formal',
+                  must_change_password: int = 0) -> dict:
     """
     注册新用户
     返回 {'success': True/False, 'message': str, 'user_id': int}
@@ -81,8 +82,8 @@ def register_user(username: str, password: str, role: str = 'student',
 
         # 插入用户
         cursor.execute("""
-            INSERT INTO users (username, password_hash, salt, role, real_name, class_name, student_id, status, must_change_password)
-            VALUES (:uname, :phash, :salt, :role, :rname, :cname, :sid, 'active', :mcp)
+            INSERT INTO users (username, password_hash, salt, role, real_name, class_name, student_id, user_type, status, must_change_password)
+            VALUES (:uname, :phash, :salt, :role, :rname, :cname, :sid, :utype, 'active', :mcp)
         """, {
             'uname': username,
             'phash': password_hash,
@@ -91,6 +92,7 @@ def register_user(username: str, password: str, role: str = 'student',
             'rname': real_name,
             'cname': class_name,
             'sid': student_id,
+            'utype': user_type,
             'mcp': must_change_password
         })
         conn.commit()
@@ -112,7 +114,7 @@ def get_student_list() -> list:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, username, real_name, class_name, student_id, status,
-                   must_change_password, created_at
+                   must_change_password, created_at, user_type
             FROM users WHERE role = 'student'
             ORDER BY created_at DESC
         """)
@@ -128,6 +130,7 @@ def get_student_list() -> list:
                 'status': row[5],
                 'must_change_password': bool(row[6]),
                 'created_at': str(row[7]) if row[7] else '',
+                'user_type': row[8] or 'formal',
             })
         return result
 
@@ -234,7 +237,7 @@ def login(username: str, password: str) -> dict:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, username, password_hash, salt, role, real_name, class_name, status, must_change_password
+            SELECT id, username, password_hash, salt, role, real_name, class_name, status, must_change_password, user_type
             FROM users WHERE username = :uname
         """, {'uname': username})
 
@@ -242,7 +245,7 @@ def login(username: str, password: str) -> dict:
         if not row:
             return {'success': False, 'message': '用户名或密码错误'}
 
-        user_id, uname, pw_hash, salt, role, rname, cname, status, mcp = row
+        user_id, uname, pw_hash, salt, role, rname, cname, status, mcp, utype = row
 
         # 检查账号状态
         if status == 'disabled':
@@ -261,6 +264,7 @@ def login(username: str, password: str) -> dict:
                 'role': role,
                 'real_name': rname,
                 'class_name': cname,
+                'user_type': utype or 'formal',
                 'must_change_password': bool(mcp)
             }
         }

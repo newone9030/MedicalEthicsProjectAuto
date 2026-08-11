@@ -48,6 +48,14 @@ def _migrate_sqlite(conn):
             print("[DB] 已添加 users.student_id 字段")
         except Exception as e:
             print(f"[DB] 迁移 users.student_id 失败: {e}")
+    # 检查 user_type 字段是否存在
+    if 'user_type' not in columns:
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN user_type VARCHAR2(10) DEFAULT 'formal'")
+            conn.commit()
+            print("[DB] 已添加 users.user_type 字段")
+        except Exception as e:
+            print(f"[DB] 迁移 users.user_type 失败: {e}")
 
 
 def _create_sqlite_tables(conn):
@@ -62,6 +70,7 @@ def _create_sqlite_tables(conn):
             real_name VARCHAR2(50),
             class_name VARCHAR2(100),
             student_id VARCHAR2(50),
+            user_type VARCHAR2(10) DEFAULT 'formal',
             status VARCHAR2(10) DEFAULT 'active',
             must_change_password INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -122,6 +131,48 @@ def _create_sqlite_tables(conn):
             response_id INTEGER NOT NULL REFERENCES responses(id) ON DELETE CASCADE,
             question_id INTEGER NOT NULL REFERENCES case_questions(id),
             answer TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS feedback_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title VARCHAR2(200) NOT NULL,
+            description TEXT,
+            page_category VARCHAR2(20) NOT NULL DEFAULT 'case',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS feedback_questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES feedback_tasks(id) ON DELETE CASCADE,
+            question_text TEXT NOT NULL,
+            question_type VARCHAR2(10) NOT NULL DEFAULT 'radio',
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS feedback_question_options (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER NOT NULL REFERENCES feedback_questions(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            value INTEGER NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            requires_comment INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS feedback_task_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES feedback_tasks(id) ON DELETE CASCADE,
+            survey_question_id INTEGER NOT NULL REFERENCES case_questions(id),
+            UNIQUE(task_id, survey_question_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS feedback_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL REFERENCES users(id),
+            survey_question_id INTEGER,
+            feedback_question_id INTEGER NOT NULL REFERENCES feedback_questions(id),
+            selected_option_id INTEGER REFERENCES feedback_question_options(id),
+            comment_text TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     conn.commit()

@@ -21,6 +21,9 @@ from app.analytics.export import build_export_buttons
 from app.response.response_service import get_response_count
 from app.analytics.analytics_service import get_student_count
 from app.auth.account_manager_view import build_account_manager_view
+from app.auth.feedback_task_manager_view import build_feedback_task_list_view, build_feedback_task_editor
+from app.student.feedback_view import build_feedback_view
+from app.student.feedback_service import has_feedback
 
 
 # ============================================
@@ -108,6 +111,14 @@ def _build_view(route: str, page: ft.Page, **kwargs):
     elif route == '/admin/accounts':
         return _build_account_management(page)
 
+    elif route == '/admin/feedback/tasks':
+        return _build_feedback_task_list(page)
+
+    elif route == '/admin/feedback/task/editor':
+        page_category = kwargs.get('page_category')
+        task_id = kwargs.get('task_id')
+        return _build_feedback_task_editor(page, page_category, task_id)
+
     # 学生视图
     elif route == '/student/consent':
         return _build_consent_page(page)
@@ -122,6 +133,9 @@ def _build_view(route: str, page: ft.Page, **kwargs):
         task_id = kwargs.get('task_id')
         readonly = kwargs.get('readonly', False)
         return _build_survey_page(page, task_id, readonly)
+
+    elif route == '/student/feedback':
+        return _build_student_feedback_page(page)
 
     else:
         return ft.View(
@@ -189,6 +203,8 @@ def _build_admin_dashboard(page: ft.Page) -> ft.View:
                      lambda e: navigate('admin/analytics')),
         _entry_card('账号管理', '创建医学生账号，管理账号状态，重置密码', ft.Icons.MANAGE_ACCOUNTS,
                      lambda e: navigate('admin/accounts')),
+        _entry_card('反馈任务维护', '创建和维护预测试反馈任务，管理题目和选项', ft.Icons.FEEDBACK,
+                     lambda e: navigate('admin/feedback/tasks')),
     ], spacing=16, wrap=True)
 
     return ft.View(
@@ -655,6 +671,118 @@ def _build_survey_page(page: ft.Page, task_id: int, readonly: bool = False) -> f
 
 
 # ============================================
+# 管理员反馈任务维护页
+# ============================================
+def _build_feedback_task_list(page: ft.Page) -> ft.View:
+    def go_back():
+        _navigate(page, 'dashboard')
+
+    def on_create_task(e, page_category: str, task_id: int = None):
+        _navigate(page, 'admin/feedback/task/editor',
+                  page_category=page_category, task_id=task_id)
+
+    return ft.View(
+        route='/admin/feedback/tasks',
+        scroll=ft.ScrollMode.AUTO,
+        controls=[
+            ft.Container(
+                content=ft.Column(
+                    build_feedback_task_list_view(page, on_back=go_back, on_create_task=on_create_task),
+                    expand=True, spacing=16,
+                ),
+                padding=24,
+                expand=True,
+            ),
+        ],
+        bgcolor='#F5F7FA',
+    )
+
+
+def _build_feedback_task_editor(page: ft.Page, page_category: str = None,
+                                task_id: int = None) -> ft.View:
+    nav_params = page.session.store.get('_nav_params')
+    if nav_params:
+        page_category = nav_params.get('page_category') or page_category
+        task_id = nav_params.get('task_id') or task_id
+        page.session.store.remove('_nav_params')
+
+    def go_back():
+        _navigate(page, 'admin/feedback/tasks')
+
+    return ft.View(
+        route='/admin/feedback/task/editor',
+        scroll=ft.ScrollMode.AUTO,
+        controls=[
+            ft.Container(
+                content=ft.Column(
+                    build_feedback_task_editor(page, page_category or 'case', task_id, on_back=go_back),
+                ),
+                padding=24,
+                expand=True,
+            ),
+        ],
+        bgcolor='#F5F7FA',
+    )
+
+
+# ============================================
+# 学生反馈页
+# ============================================
+def _build_student_feedback_page(page: ft.Page) -> ft.View:
+    user = page.session.store.get('user') or {}
+    student_id = user.get('id')
+
+    # 获取当前活跃任务（用于查找已回答题目）
+    from app.task.task_service import get_active_task_for_student
+    from app.response.response_service import get_submission_status
+
+    active_task = get_active_task_for_student(student_id)
+
+    if not active_task:
+        return ft.View(
+            route='/student/feedback',
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.ERROR_OUTLINE, size=64, color='#FF9800'),
+                        ft.Text('无法加载反馈', size=18, weight=ft.FontWeight.W_500, color='#757575'),
+                        ft.Text('未找到活跃任务', size=14, color='#BDBDBD'),
+                        ft.ElevatedButton(
+                            content='返回仪表盘',
+                            on_click=lambda e: _navigate(page, 'dashboard'),
+                            icon=ft.Icons.ARROW_BACK,
+                        ),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12),
+                    padding=60,
+                ),
+            ],
+            bgcolor='#F5F7FA',
+        )
+
+    def on_feedback_complete():
+        """反馈完成后退出系统"""
+        _logout(page)
+
+    return ft.View(
+        route='/student/feedback',
+        scroll=ft.ScrollMode.AUTO,
+        controls=[
+            ft.Container(
+                content=ft.Column(
+                    build_feedback_view(page, student_id, active_task['id'],
+                                        on_complete=on_feedback_complete),
+                    expand=True,
+                ),
+                padding=24,
+                expand=True,
+            ),
+        ],
+        bgcolor='#F5F7FA',
+    )
+
+
+# ============================================
 # 退出登录
 # ============================================
 def _logout(page: ft.Page):
@@ -773,5 +901,6 @@ mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 DB_PATH = os.path.join(mount_path, "survey.db")
 
 if __name__ == '__main__':
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
-           , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
+         ##  , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER)

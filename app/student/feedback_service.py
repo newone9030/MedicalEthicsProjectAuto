@@ -1,0 +1,187 @@
+"""
+学生反馈服务
+"""
+
+from app.db import get_connection
+
+
+def get_student_answered_questions(student_id: int, task_id: int) -> list:
+    """
+    获取学生在指定任务中已提交的作答题目（含案例信息）
+    返回 [{survey_question_id, question_text, question_type, case_id, case_title}, ...]
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT cq.id, cq.question_text, cq.question_type, cq.case_id, c.title
+            FROM responses r
+            JOIN response_details rd ON rd.response_id = r.id
+            JOIN case_questions cq ON rd.question_id = cq.id
+            JOIN cases c ON cq.case_id = c.id
+            WHERE r.student_id = :sid AND r.task_id = :tid AND r.status = 'submitted'
+            ORDER BY cq.case_id, cq.sort_order
+        """, {'sid': student_id, 'tid': task_id})
+        rows = cursor.fetchall()
+        return [
+            {
+                'survey_question_id': row[0],
+                'question_text': row[1],
+                'question_type': row[2],
+                'case_id': row[3],
+                'case_title': row[4],
+            }
+            for row in rows
+        ]
+
+
+def get_feedback_tasks_for_question(survey_question_id: int) -> list:
+    """
+    获取关联到指定调查题的 case 类反馈任务（含题目和选项）
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # 先找映射
+        cursor.execute("""
+            SELECT ft.id, ft.title, ft.description
+            FROM feedback_task_mappings ftm
+            JOIN feedback_tasks ft ON ftm.task_id = ft.id
+            WHERE ftm.survey_question_id = :sqid AND ft.page_category = 'case'
+        """, {'sqid': survey_question_id})
+        tasks = []
+        for t_row in cursor.fetchall():
+            task = {
+                'id': t_row[0],
+                'title': t_row[1],
+                'description': t_row[2] or '',
+                'questions': [],
+            }
+            # 获取该任务下的题目
+            cursor.execute("""
+                SELECT id, question_text, question_type, sort_order
+                FROM feedback_questions
+                WHERE task_id = :tid
+                ORDER BY sort_order, id
+            """, {'tid': t_row[0]})
+            for q_row in cursor.fetchall():
+                q = {
+                    'id': q_row[0],
+                    'question_text': q_row[1],
+                    'question_type': q_row[2],
+                    'sort_order': q_row[3],
+                    'options': [],
+                }
+                if q['question_type'] == 'radio':
+                    cursor.execute("""
+                        SELECT id, label, value, sort_order, requires_comment
+                        FROM feedback_question_options
+                        WHERE question_id = :qid
+                        ORDER BY sort_order, id
+                    """, {'qid': q['id']})
+                    q['options'] = [
+                        {
+                            'id': o[0],
+                            'label': o[1],
+                            'value': o[2],
+                            'sort_order': o[3],
+                            'requires_comment': bool(o[4]),
+                        }
+                        for o in cursor.fetchall()
+                    ]
+                task['questions'].append(q)
+            tasks.append(task)
+        return tasks
+
+
+def get_feedback_tasks_by_category(page_category: str) -> list:
+    """
+    按 page_category 获取所有反馈任务（含题目和选项）
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, title, description
+            FROM feedback_tasks
+            WHERE page_category = :cat
+            ORDER BY created_at DESC
+        """, {'cat': page_category})
+        tasks = []
+        for t_row in cursor.fetchall():
+            task = {
+                'id': t_row[0],
+                'title': t_row[1],
+                'description': t_row[2] or '',
+                'questions': [],
+            }
+            cursor.execute("""
+                SELECT id, question_text, question_type, sort_order
+                FROM feedback_questions
+                WHERE task_id = :tid
+                ORDER BY sort_order, id
+            """, {'tid': t_row[0]})
+            for q_row in cursor.fetchall():
+                q = {
+                    'id': q_row[0],
+                    'question_text': q_row[1],
+                    'question_type': q_row[2],
+                    'sort_order': q_row[3],
+                    'options': [],
+                }
+                if q['question_type'] == 'radio':
+                    cursor.execute("""
+                        SELECT id, label, value, sort_order, requires_comment
+                        FROM feedback_question_options
+                        WHERE question_id = :qid
+                        ORDER BY sort_order, id
+                    """, {'qid': q['id']})
+                    q['options'] = [
+                        {
+                            'id': o[0],
+                            'label': o[1],
+                            'value': o[2],
+                            'sort_order': o[3],
+                            'requires_comment': bool(o[4]),
+                        }
+                        for o in cursor.fetchall()
+                    ]
+                task['questions'].append(q)
+            tasks.append(task)
+        return tasks
+
+
+def submit_feedbacks(student_id: int, feedbacks: list) -> dict:
+    """
+    批量写入反馈作答
+    feedbacks: [{'survey_question_id': int, 'feedback_question_id': int,
+                 'selected_option_id': int, 'comment_text': str}, ...]
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # 先删除学生已有的所有反馈记录
+        cursor.execute("DELETE FROM feedback_responses WHERE student_id = :sid",
+                       {'sid': student_id})
+
+        for fb in feedbacks:
+            cursor.execute("""
+                INSERT INTO feedback_responses
+                    (student_id, survey_question_id, feedback_question_id, selected_option_id, comment_text)
+                VALUES (:sid, :sqid, :fqid, :oid, :com)
+            """, {
+                'sid': student_id,
+                'sqid': fb.get('survey_question_id'),
+                'fqid': fb['feedback_question_id'],
+                'oid': fb.get('selected_option_id'),
+                'com': fb.get('comment_text'),
+            })
+        conn.commit()
+        return {'success': True, 'message': '反馈已提交'}
+
+
+def has_feedback(student_id: int) -> bool:
+    """检查学生是否已提交反馈"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM feedback_responses WHERE student_id = :sid",
+            {'sid': student_id}
+        )
+        return cursor.fetchone()[0] > 0
