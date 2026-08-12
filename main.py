@@ -9,7 +9,7 @@ from app.db import test_connection, close_db
 from app.auth import login_view
 from app.case.case_service import get_case_count
 from app.task.task_service import get_background_task, get_task, get_active_task_for_student
-from app.response.response_service import is_background_completed
+from app.response.response_service import is_background_completed, get_submission_status
 from app.student.background_survey_view import build_background_survey_view
 from app.case.case_manager_view import build_case_list_view, build_case_editor_view
 from app.task.task_service import get_task_count, get_active_task_count, auto_update_task_statuses
@@ -600,11 +600,69 @@ def _build_background_page(page: ft.Page) -> ft.View:
 # ============================================
 # 学生仪表盘
 # ============================================
+def _test_user_requires_feedback(page: ft.Page) -> bool:
+    """
+    测试用户是否处于"必须完成反馈"状态：
+    测试用户 + 背景已完成 + 所有活跃任务已提交 + 未提交反馈
+    """
+    user = page.session.store.get('user') or {}
+    if user.get('user_type') != 'test':
+        return False
+    student_id = user.get('id')
+    if has_feedback(student_id):
+        return False
+    bg_task = get_background_task()
+    if bg_task and not is_background_completed(bg_task['id'], student_id):
+        return False
+    task = get_active_task_for_student(student_id)
+    if not task:
+        # 无活跃任务（任务已关闭/尚未发布）：反馈页无法加载，不强制
+        return False
+    statuses = get_submission_status(task['id'], student_id)
+    all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
+    return all_submitted
+
+
+def _show_feedback_required_dialog(page: ft.Page):
+    """测试用户任务已作答完但反馈未完成：阻止退出，引导先完成反馈"""
+
+    def _close_dlg(e):
+        dlg.open = False
+        page.update()
+
+    def _go_feedback(e):
+        dlg.open = False
+        page.update()
+        _navigate(page, 'student/feedback')
+
+    dlg = ft.AlertDialog(
+        modal=True,
+        title=ft.Text('请先完成反馈任务', size=16, weight=ft.FontWeight.BOLD, color='#E65100'),
+        content=ft.Text(
+            '您已完成所有任务作答。\n\n'
+            '请先完成预测试反馈任务，反馈完成后才能退出系统。',
+            size=14, color='#424242',
+        ),
+        actions=[
+            ft.TextButton('暂不退出', on_click=_close_dlg),
+            ft.ElevatedButton('去填写反馈', on_click=_go_feedback,
+                              style=ft.ButtonStyle(bgcolor='#FF9800', color='white')),
+        ],
+    )
+    page.overlay.append(dlg)
+    dlg.open = True
+    page.update()
+
+
 def _build_student_page(page: ft.Page) -> ft.View:
     def on_enter_task(task_id, page, readonly=False):
         _navigate(page, 'student/survey', task_id=task_id, readonly=readonly)
 
     def on_logout(e):
+        # 测试用户：任务已作答完但反馈未完成 → 必须先完成反馈才能退出系统
+        if _test_user_requires_feedback(page):
+            _show_feedback_required_dialog(page)
+            return
         _logout(page)
 
     user = page.session.store.get('user') or {}
@@ -842,15 +900,8 @@ def main(page: ft.Page):
             else:
                 route = '/student/consent'
 
-        # 学生已同意但未完成背景资料 → 重定向到背景资料页
-        if (route == '/student/dashboard' and user
-                and user['role'] == 'student'
-                and page.session.store.get('student_consented')
-                and not page.session.store.get('background_completed')):
-            bg_task = get_background_task()
-            if bg_task and not is_background_completed(bg_task['id'], user['id']):
-                print('[ROUTE] 背景资料未完成，重定向到 /student/background')
-                route = '/student/background'
+        # 学生已同意但未完成背景资料 → 提示先完成背景资料（不再强制跳转，
+        # 改为在 dashboard 上通过背景资料卡片引导填写）
 
         page.views.clear()
         try:
@@ -901,6 +952,6 @@ mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 DB_PATH = os.path.join(mount_path, "survey.db")
 
 if __name__ == '__main__':
-    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
-         ##  , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
+         , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER)

@@ -16,8 +16,7 @@ from app.auth.feedback_admin_service import (
 CATEGORY_LABELS = {
     'case': '案例评价',
     'task_burden': '作答要求与任务负担',
-    'course_impact': '课程影响',
-    'system_privacy': '系统与隐私体验',
+    'course_impact': '课程影响、系统与隐私体验',
     'open_feedback': '开放式反馈',
 }
 
@@ -25,7 +24,6 @@ CATEGORY_COLORS = {
     'case': '#1976D2',
     'task_burden': '#FF9800',
     'course_impact': '#4CAF50',
-    'system_privacy': '#1565C0',
     'open_feedback': '#9C27B0',
 }
 
@@ -34,7 +32,7 @@ def build_feedback_task_list_view(page: ft.Page, on_back, on_create_task) -> lis
     """构建反馈任务列表视图"""
 
     task_list_col = ft.Column(spacing=12, scroll=ft.ScrollMode.AUTO, expand=True)
-    category_order = ['case', 'task_burden', 'course_impact', 'system_privacy', 'open_feedback']
+    category_order = ['case', 'task_burden', 'course_impact', 'open_feedback']
 
     def show_snack(msg: str, success: bool = True):
         snack = ft.SnackBar(
@@ -413,6 +411,18 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
             input_filter=ft.NumbersOnlyInputFilter(),
         )
         requires_comment_switch = ft.Checkbox(label='勾选此项后，需填写补充说明', value=False)
+        comment_hint_field = ft.TextField(
+            label='补充说明提示文字', hint_text='如：请具体说明原因...',
+            border_color='#BBDEFB', focused_border_color='#1976D2',
+            visible=False,
+        )
+
+        def toggle_hint_visible(e):
+            comment_hint_field.visible = bool(e.control.value)
+            if comment_hint_field.page:
+                comment_hint_field.update()
+
+        requires_comment_switch.on_change = toggle_hint_visible
 
         def save_option(e):
             label = (label_field.value or '').strip()
@@ -421,7 +431,8 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
                 show_snack('请填写选项文字和值', success=False)
                 return
             result = add_feedback_option(question_id, label=label, value=int(val_str),
-                                          requires_comment=1 if requires_comment_switch.value else 0)
+                                          requires_comment=1 if requires_comment_switch.value else 0,
+                                          comment_hint=(comment_hint_field.value or '').strip() or None)
             if result['success']:
                 dlg.open = False
                 page.update()
@@ -438,6 +449,8 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
                 value_field,
                 ft.Divider(height=8, color='transparent'),
                 requires_comment_switch,
+                ft.Divider(height=8, color='transparent'),
+                comment_hint_field,
             ], tight=True, width=350),
             actions=[
                 ft.TextButton('取消', on_click=lambda e: (setattr(dlg, 'open', False), page.update())),
@@ -458,13 +471,21 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
             multiline=True, min_lines=2, max_lines=4,
             border_color='#BBDEFB', focused_border_color='#1976D2',
         )
+        # 仅开放题支持"必答"设置
+        required_switch = ft.Checkbox(
+            label='该题为必答题（学生必须填写才能提交）', value=False,
+            visible=(qtype == 'open'),
+        )
 
         def save_question(e):
             qtext = (qtext_field.value or '').strip()
             if not qtext:
                 show_snack('请输入题目内容', success=False)
                 return
-            result = add_feedback_question(task_id, question_text=qtext, question_type=qtype)
+            result = add_feedback_question(
+                task_id, question_text=qtext, question_type=qtype,
+                required=1 if (qtype == 'open' and required_switch.value) else 0,
+            )
             if result['success']:
                 dlg.open = False
                 page.update()
@@ -478,7 +499,11 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
 
         dlg = ft.AlertDialog(
             title=ft.Text(f'添加{"单选题" if qtype == "radio" else "开放题"}', weight=ft.FontWeight.BOLD, size=18),
-            content=ft.Column([qtext_field], tight=True, width=380),
+            content=ft.Column([
+                qtext_field,
+                ft.Divider(height=8, color='transparent'),
+                required_switch,
+            ], tight=True, width=380),
             actions=[
                 ft.TextButton('取消', on_click=lambda e: (setattr(dlg, 'open', False), page.update())),
                 ft.ElevatedButton('添加', on_click=save_question,
@@ -573,6 +598,8 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
     if q['question_type'] == 'radio':
         for o in q.get('options', []):
             comment_note = ' (需补充说明)' if o.get('requires_comment') else ''
+            if o.get('requires_comment') and (o.get('comment_hint') or '').strip():
+                comment_note += f'（提示：{o["comment_hint"]}）'
             options_col.controls.append(
                 ft.Row([
                     ft.Icon(ft.Icons.CIRCLE_OUTLINED, size=14, color='#9E9E9E'),
@@ -620,6 +647,19 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
             label='勾选此项后，需填写补充说明',
             value=o.get('requires_comment', False),
         )
+        comment_hint_field = ft.TextField(
+            label='补充说明提示文字', hint_text='如：请具体说明原因...',
+            value=o.get('comment_hint', ''),
+            border_color='#BBDEFB', focused_border_color='#1976D2',
+            visible=o.get('requires_comment', False),
+        )
+
+        def toggle_hint_visible(e):
+            comment_hint_field.visible = bool(e.control.value)
+            if comment_hint_field.page:
+                comment_hint_field.update()
+
+        requires_comment_switch.on_change = toggle_hint_visible
 
         def save_option(e):
             label = (label_field.value or '').strip()
@@ -628,7 +668,8 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
                 show_snack('请填写选项文字和值', success=False)
                 return
             result = update_feedback_option(o['id'], label=label, value=int(val_str),
-                                             requires_comment=1 if requires_comment_switch.value else 0)
+                                             requires_comment=1 if requires_comment_switch.value else 0,
+                                             comment_hint=(comment_hint_field.value or '').strip() or '')
             if result['success']:
                 dlg.open = False
                 page.update()
@@ -645,6 +686,8 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
                 value_field,
                 ft.Divider(height=8, color='transparent'),
                 requires_comment_switch,
+                ft.Divider(height=8, color='transparent'),
+                comment_hint_field,
             ], tight=True, width=350),
             actions=[
                 ft.TextButton('取消', on_click=lambda e: (setattr(dlg, 'open', False), page.update())),
@@ -658,32 +701,72 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
         dlg.open = True
         page.update()
 
-    return ft.Container(
-        content=ft.Column([
-            ft.Row([
-                ft.Container(
-                    content=ft.Row([
-                        ft.Icon(qtype_icon, size=14, color='white'),
-                        ft.Text(qtype_label, size=12, color='white', weight=ft.FontWeight.W_500),
-                    ], spacing=4),
-                    bgcolor='#1976D2' if q['question_type'] == 'radio' else '#9C27B0',
-                    border_radius=8,
-                    padding=ft.Padding(8, 2, 8, 2),
-                ),
-                ft.Text(q['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121'),
-                ft.Container(expand=True),
-                ft.IconButton(
-                    icon=ft.Icons.DELETE, icon_size=16, icon_color='#FF5252',
-                    on_click=lambda e, qid=q['id']: _exec_delete_question(qid),
-                ),
-            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
-            options_col,
-        ], spacing=6),
-        bgcolor='#FAFAFA',
-        border_radius=10,
-        border=ft.BorderSide(color='#E0E0E0', width=1),
-        padding=ft.Padding(12, 10, 8, 10),
-    )
+    def _exec_edit_question():
+        """编辑题目对话框（内容 + 类型）"""
+        qtext_field = ft.TextField(
+            label='题目内容', value=q['question_text'],
+            multiline=True, min_lines=2, max_lines=4,
+            border_color='#BBDEFB', focused_border_color='#1976D2',
+        )
+        type_dropdown = ft.Dropdown(
+            label='题目类型',
+            options=[
+                ft.DropdownOption(key='radio', text='单选题'),
+                ft.DropdownOption(key='open', text='开放题'),
+            ],
+            value=q['question_type'],
+        )
+        # 必答开关：仅开放题生效
+        required_switch = ft.Checkbox(
+            label='该题为必答题（学生必须填写才能提交）',
+            value=bool(q.get('required', False)),
+            visible=(q['question_type'] == 'open'),
+        )
+
+        def toggle_required_visible(e):
+            required_switch.visible = (type_dropdown.value == 'open')
+            if required_switch.page:
+                required_switch.update()
+
+        type_dropdown.on_change = toggle_required_visible
+
+        def save_question(e):
+            qtext = (qtext_field.value or '').strip()
+            if not qtext:
+                show_snack('请输入题目内容', success=False)
+                return
+            result = update_feedback_question(
+                q['id'], question_text=qtext, question_type=type_dropdown.value,
+                required=1 if (type_dropdown.value == 'open' and required_switch.value) else 0,
+            )
+            if result['success']:
+                dlg.open = False
+                page.update()
+                show_snack('题目已更新')
+                refresh_content()
+            else:
+                show_snack(result['message'], success=False)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text('编辑题目', weight=ft.FontWeight.BOLD, size=18),
+            content=ft.Column([
+                qtext_field,
+                ft.Divider(height=8, color='transparent'),
+                type_dropdown,
+                ft.Divider(height=8, color='transparent'),
+                required_switch,
+            ], tight=True, width=380),
+            actions=[
+                ft.TextButton('取消', on_click=lambda e: (setattr(dlg, 'open', False), page.update())),
+                ft.ElevatedButton('保存', on_click=save_question,
+                                 style=ft.ButtonStyle(bgcolor='#1976D2', color='white',
+                                                     shape=ft.RoundedRectangleBorder(radius=8))),
+            ],
+            modal=True,
+        )
+        page.overlay.append(dlg)
+        dlg.open = True
+        page.update()
 
     def _exec_delete_question(qid):
         dlg = ft.AlertDialog(
@@ -708,9 +791,51 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
             show_snack('题目已删除')
             refresh_content()
 
+    return ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(qtype_icon, size=14, color='white'),
+                        ft.Text(qtype_label, size=12, color='white', weight=ft.FontWeight.W_500),
+                    ], spacing=4),
+                    bgcolor='#1976D2' if q['question_type'] == 'radio' else '#9C27B0',
+                    border_radius=8,
+                    padding=ft.Padding(8, 2, 8, 2),
+                ),
+                ft.Text(q['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121'),
+                ft.Container(
+                    content=ft.Text('必答', size=11, weight=ft.FontWeight.W_600, color='#FF5252'),
+                    visible=(q['question_type'] == 'open' and bool(q.get('required', False))),
+                ),
+                ft.Container(expand=True),
+                ft.IconButton(
+                    icon=ft.Icons.EDIT, icon_size=16, icon_color='#1976D2',
+                    tooltip='编辑题目',
+                    on_click=lambda e: _exec_edit_question(),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.DELETE, icon_size=16, icon_color='#FF5252',
+                    tooltip='删除题目',
+                    on_click=lambda e, qid=q['id']: _exec_delete_question(qid),
+                ),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+            options_col,
+        ], spacing=6),
+        bgcolor='#FAFAFA',
+        border_radius=10,
+        border=ft.BorderSide(color='#E0E0E0', width=1),
+        padding=ft.Padding(12, 10, 8, 10),
+    )
+
 
 def _build_mapping_row(page, task_id, mapping, show_snack, refresh_content):
     """构建关联调查题行"""
+    def _exec_remove_mapping():
+        remove_feedback_task_mapping(task_id, mapping['survey_question_id'])
+        show_snack('关联已移除')
+        refresh_content()
+
     return ft.Container(
         content=ft.Row([
             ft.Icon(ft.Icons.LINK, size=16, color='#1976D2'),
@@ -727,8 +852,3 @@ def _build_mapping_row(page, task_id, mapping, show_snack, refresh_content):
         border_radius=10,
         padding=ft.Padding(12, 8, 8, 8),
     )
-
-    def _exec_remove_mapping():
-        remove_feedback_task_mapping(task_id, mapping['survey_question_id'])
-        show_snack('关联已移除')
-        refresh_content()

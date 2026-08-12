@@ -7,7 +7,7 @@ import threading
 import flet as ft
 from app.task.task_service import get_active_task_for_student, get_background_task
 from app.response.response_service import get_submission_status, delete_student_responses, delete_background_survey_responses, is_background_completed
-from app.student.feedback_service import has_feedback
+from app.student.feedback_service import has_feedback, get_student_feedback, delete_student_feedback
 
 
 def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
@@ -40,9 +40,9 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
 
         task_container.controls.clear()
 
-        # ---- 背景资料卡片（已完成则显示） ----
+        # ---- 背景资料卡片（无论是否完成都显示入口） ----
         bg_task = get_background_task()
-        if bg_task and is_background_completed(bg_task['id'], student_id):
+        if bg_task:
             task_container.controls.append(
                 _build_background_survey_card(bg_task, student_id, page, refresh_task)
             )
@@ -61,7 +61,8 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
             _add_history_tasks(task_container, student_id, page, on_enter_task)
 
         # 测试用户反馈入口（无论活跃任务是否存在，检查条件）
-        _maybe_add_feedback_entry(task_container, page, student_id, user, task, bg_task)
+        _maybe_add_feedback_entry(task_container, page, student_id, user, task, bg_task,
+                                  refresh_cb=refresh_task)
 
         if task_container.page:
             task_container.update()
@@ -305,7 +306,13 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
 
 def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
                                   on_refresh: callable) -> ft.Container:
-    """构建背景资料卡片（已完成状态，可重新填写）"""
+    """构建背景资料卡片（支持未完成/已完成两种状态）"""
+    completed = is_background_completed(bg_task['id'], student_id)
+
+    def go_fill(e):
+        # 未完成时直接进入填写
+        page.session.store.set('background_completed', False)
+        page.go('/student/background')
 
     def show_restart_confirm(e):
         page.overlay.append(confirm_dlg)
@@ -336,45 +343,71 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
         modal=True,
     )
 
+    status_badge = None
+    if completed:
+        status_badge = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.CHECK_CIRCLE, color='white', size=16),
+                ft.Text('已完成', size=14, color='white', weight=ft.FontWeight.W_600),
+            ], spacing=4),
+            bgcolor='#4CAF50',
+            border_radius=12,
+            padding=ft.Padding(10, 4, 10, 4),
+        )
+    else:
+        status_badge = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.ERROR_OUTLINE, color='white', size=16),
+                ft.Text('未填写', size=14, color='white', weight=ft.FontWeight.W_600),
+            ], spacing=4),
+            bgcolor='#FF9800',
+            border_radius=12,
+            padding=ft.Padding(10, 4, 10, 4),
+        )
+
+    action_btn = None
+    if completed:
+        action_btn = ft.OutlinedButton(
+            content='重新填写',
+            icon=ft.Icons.REFRESH,
+            on_click=show_restart_confirm,
+            style=ft.ButtonStyle(
+                color='#7B1FA2',
+                shape=ft.RoundedRectangleBorder(radius=8),
+                side=ft.BorderSide(color='#7B1FA2', width=1),
+            ),
+        )
+    else:
+        action_btn = ft.ElevatedButton(
+            content='去填写',
+            icon=ft.Icons.EDIT,
+            on_click=go_fill,
+            style=ft.ButtonStyle(
+                bgcolor='#7B1FA2', color='white',
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        )
+
     return ft.Container(
         content=ft.Column([
             ft.Row([
                 ft.Container(
                     content=ft.Row([
                         ft.Icon(ft.Icons.ASSIGNMENT_IND, color='white', size=16),
-                        ft.Text('背景资料', size=16, color='white', weight=ft.FontWeight.W_600),
+                        ft.Text('背景资料调查', size=16, color='white', weight=ft.FontWeight.W_600),
                     ], spacing=6),
                     bgcolor='#7B1FA2',
                     border_radius=12,
                     padding=ft.Padding(10, 4, 10, 4),
                 ),
                 ft.Container(expand=True),
-                ft.Container(
-                    content=ft.Row([
-                        ft.Icon(ft.Icons.CHECK_CIRCLE, color='white', size=16),
-                        ft.Text('已完成', size=14, color='white', weight=ft.FontWeight.W_600),
-                    ], spacing=4),
-                    bgcolor='#4CAF50',
-                    border_radius=12,
-                    padding=ft.Padding(10, 4, 10, 4),
-                ),
+                status_badge,
             ]),
             ft.Divider(height=12, color='transparent'),
             ft.Text(bg_task.get('description', '')[:80] or bg_task.get('name', '背景资料任务'),
                     size=14, color='#757575'),
             ft.Divider(height=12, color='transparent'),
-            ft.Row([
-                ft.OutlinedButton(
-                    content='重新填写',
-                    icon=ft.Icons.REFRESH,
-                    on_click=show_restart_confirm,
-                    style=ft.ButtonStyle(
-                        color='#7B1FA2',
-                        shape=ft.RoundedRectangleBorder(radius=8),
-                        side=ft.BorderSide(color='#7B1FA2', width=1),
-                    ),
-                ),
-            ], alignment=ft.MainAxisAlignment.END),
+            ft.Row([action_btn], alignment=ft.MainAxisAlignment.END),
         ], spacing=0),
         bgcolor='white',
         border_radius=16,
@@ -454,33 +487,42 @@ def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_
 
 
 def _maybe_add_feedback_entry(container: ft.Column, page: ft.Page, student_id: int,
-                               user: dict, task: dict, bg_task: dict):
+                               user: dict, task: dict, bg_task: dict,
+                               refresh_cb=None):
     """
-    条件：测试用户 + 背景已完成 + 所有任务已提交 + 未提交反馈 → 显示反馈入口
+    测试用户反馈区：
+    - 已提交反馈 → 显示"查看反馈/删除反馈"卡片
+    - 未提交反馈且（背景已完成 + 所有任务已提交）→ 显示"进入反馈"卡片
     """
     if user.get('user_type') != 'test':
         return
-    if not has_feedback(student_id):
-        # 检查背景是否完成
-        bg_completed = False
-        if bg_task:
-            bg_completed = is_background_completed(bg_task['id'], student_id)
-        else:
-            bg_completed = True  # 无背景任务视为已完成
 
-        if not bg_completed:
-            return
-
-        # 检查活跃任务
-        if task:
-            statuses = get_submission_status(task['id'], student_id)
-            all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
-            if not all_submitted:
-                return
-        # 如果没有活跃任务（可能任务已关闭），也显示入口
-
+    # 已提交反馈：提供查看与删除入口
+    if has_feedback(student_id):
         container.controls.append(ft.Divider(height=15, color='transparent'))
-        container.controls.append(_build_feedback_entry_card(page))
+        container.controls.append(_build_feedback_view_card(page, student_id, refresh_cb))
+        return
+
+    # 检查背景是否完成
+    bg_completed = False
+    if bg_task:
+        bg_completed = is_background_completed(bg_task['id'], student_id)
+    else:
+        bg_completed = True  # 无背景任务视为已完成
+
+    if not bg_completed:
+        return
+
+    # 检查活跃任务
+    if task:
+        statuses = get_submission_status(task['id'], student_id)
+        all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
+        if not all_submitted:
+            return
+    # 如果没有活跃任务（可能任务已关闭），也显示入口
+
+    container.controls.append(ft.Divider(height=15, color='transparent'))
+    container.controls.append(_build_feedback_entry_card(page))
 
 
 def _build_feedback_entry_card(page: ft.Page) -> ft.Container:
@@ -526,5 +568,179 @@ def _build_feedback_entry_card(page: ft.Page) -> ft.Container:
         border_radius=16,
         padding=ft.Padding(20, 16, 20, 16),
         shadow=ft.BoxShadow(spread_radius=1, blur_radius=15, color='#00000015'),
-        border=ft.border.all(width=1, color='#FFE0B2'),
+        border=ft.Border.all(width=1, color='#FFE0B2'),
     )
+
+
+def _build_feedback_view_card(page: ft.Page, student_id: int,
+                              refresh_cb=None) -> ft.Container:
+    """已提交反馈后的"查看反馈 / 删除反馈"卡片"""
+
+    def on_view_feedback(e):
+        dlg = _build_feedback_view_dialog(page, student_id)
+        page.overlay.append(dlg)
+        dlg.open = True
+        page.update()
+
+    def on_delete_feedback(e):
+        def do_delete(ev):
+            dlg.open = False
+            page.update()
+            try:
+                delete_student_feedback(student_id)
+                snack = ft.SnackBar(ft.Text('反馈已删除，可重新填写', color='white'),
+                                    bgcolor='#43A047')
+            except Exception as ex:
+                snack = ft.SnackBar(ft.Text(f'删除失败: {ex}', color='white'),
+                                    bgcolor='#E53935')
+            page.overlay.append(snack)
+            snack.open = True
+            page.update()
+            if refresh_cb:
+                refresh_cb()
+
+        def cancel_delete(ev):
+            dlg.open = False
+            page.update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text('删除反馈'),
+            content=ft.Text('确定要删除已提交的反馈吗？删除后可以重新填写反馈内容。'),
+            actions=[
+                ft.TextButton(content='取消', on_click=cancel_delete),
+                ft.ElevatedButton(
+                    content='确认删除',
+                    style=ft.ButtonStyle(
+                        bgcolor='#E53935', color='white',
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                    on_click=do_delete,
+                ),
+            ],
+        )
+        page.overlay.append(dlg)
+        dlg.open = True
+        page.update()
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Row([
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.FEEDBACK, color='white', size=18),
+                        ft.Text('预测试最终反馈', size=18, color='white', weight=ft.FontWeight.W_600),
+                    ], spacing=8),
+                    bgcolor='#1565C0',
+                    border_radius=12,
+                    padding=ft.Padding(14, 6, 14, 6),
+                ),
+                ft.Container(expand=True),
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.CHECK_CIRCLE, color='white', size=16),
+                        ft.Text('已提交', size=14, color='white', weight=ft.FontWeight.W_600),
+                    ], spacing=4),
+                    bgcolor='#4CAF50',
+                    border_radius=12,
+                    padding=ft.Padding(10, 4, 10, 4),
+                ),
+            ]),
+            ft.Divider(height=12, color='transparent'),
+            ft.Text(
+                '您已完成预测试反馈，可点击下方按钮查看已提交的反馈内容。',
+                size=14, color='#616161',
+            ),
+            ft.Divider(height=12, color='transparent'),
+            ft.Row([
+                ft.Container(expand=True),
+                ft.TextButton(
+                    content='删除反馈',
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    on_click=on_delete_feedback,
+                    style=ft.ButtonStyle(
+                        color='#D32F2F',
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+                ft.ElevatedButton(
+                    content='查看反馈',
+                    icon=ft.Icons.VISIBILITY,
+                    on_click=on_view_feedback,
+                    style=ft.ButtonStyle(
+                        bgcolor='#1565C0', color='white',
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+            ]),
+        ], spacing=0),
+        bgcolor='#E3F2FD',
+        border_radius=16,
+        padding=ft.Padding(20, 16, 20, 16),
+        shadow=ft.BoxShadow(spread_radius=1, blur_radius=15, color='#00000015'),
+        border=ft.Border.all(width=1, color='#BBDEFB'),
+    )
+
+
+def _build_feedback_view_dialog(page: ft.Page, student_id: int) -> ft.AlertDialog:
+    """查看反馈内容对话框"""
+    items = get_student_feedback(student_id)
+
+    def close_dlg(e):
+        dlg.open = False
+        page.update()
+
+    if not items:
+        body = ft.Container(
+            content=ft.Column([
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=48, color='#BDBDBD'),
+                ft.Text('暂无反馈内容', size=16, color='#757575'),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            padding=30,
+            alignment=ft.Alignment.CENTER,
+            width=540,
+        )
+    else:
+        content_col = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
+        last_group = None
+        for item in items:
+            if item['group_title'] != last_group:
+                last_group = item['group_title']
+                content_col.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.SUBJECT, color='#1565C0', size=18),
+                            ft.Text(item['group_title'], size=16,
+                                    weight=ft.FontWeight.BOLD, color='#1565C0'),
+                        ], spacing=6),
+                        bgcolor='#E3F2FD',
+                        border_radius=8,
+                        padding=ft.Padding(12, 8, 12, 8),
+                    )
+                )
+            answer_text = item['answer_text'] or '（未作答）'
+            q_col = ft.Column(spacing=4)
+            q_col.controls.append(
+                ft.Text(item['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121')
+            )
+            q_col.controls.append(
+                ft.Container(
+                    content=ft.Text(answer_text, size=14, color='#1565C0'),
+                    padding=ft.Padding(12, 8, 12, 8),
+                    bgcolor='#FAFAFA',
+                    border_radius=6,
+                    width=500,
+                )
+            )
+            content_col.controls.append(q_col)
+        body = ft.Container(content=content_col, width=540, height=460)
+
+    dlg = ft.AlertDialog(
+        title=ft.Text('我的反馈内容'),
+        content=body,
+        actions=[
+            ft.TextButton(content='关闭', on_click=close_dlg),
+        ],
+        modal=True,
+    )
+    return dlg

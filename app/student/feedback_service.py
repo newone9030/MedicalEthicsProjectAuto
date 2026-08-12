@@ -57,7 +57,7 @@ def get_feedback_tasks_for_question(survey_question_id: int) -> list:
             }
             # 获取该任务下的题目
             cursor.execute("""
-                SELECT id, question_text, question_type, sort_order
+                SELECT id, question_text, question_type, sort_order, required
                 FROM feedback_questions
                 WHERE task_id = :tid
                 ORDER BY sort_order, id
@@ -68,11 +68,12 @@ def get_feedback_tasks_for_question(survey_question_id: int) -> list:
                     'question_text': q_row[1],
                     'question_type': q_row[2],
                     'sort_order': q_row[3],
+                    'required': bool(q_row[4]),
                     'options': [],
                 }
                 if q['question_type'] == 'radio':
                     cursor.execute("""
-                        SELECT id, label, value, sort_order, requires_comment
+                        SELECT id, label, value, sort_order, requires_comment, comment_hint
                         FROM feedback_question_options
                         WHERE question_id = :qid
                         ORDER BY sort_order, id
@@ -84,6 +85,7 @@ def get_feedback_tasks_for_question(survey_question_id: int) -> list:
                             'value': o[2],
                             'sort_order': o[3],
                             'requires_comment': bool(o[4]),
+                            'comment_hint': o[5] or '',
                         }
                         for o in cursor.fetchall()
                     ]
@@ -113,7 +115,7 @@ def get_feedback_tasks_by_category(page_category: str) -> list:
                 'questions': [],
             }
             cursor.execute("""
-                SELECT id, question_text, question_type, sort_order
+                SELECT id, question_text, question_type, sort_order, required
                 FROM feedback_questions
                 WHERE task_id = :tid
                 ORDER BY sort_order, id
@@ -124,11 +126,12 @@ def get_feedback_tasks_by_category(page_category: str) -> list:
                     'question_text': q_row[1],
                     'question_type': q_row[2],
                     'sort_order': q_row[3],
+                    'required': bool(q_row[4]),
                     'options': [],
                 }
                 if q['question_type'] == 'radio':
                     cursor.execute("""
-                        SELECT id, label, value, sort_order, requires_comment
+                        SELECT id, label, value, sort_order, requires_comment, comment_hint
                         FROM feedback_question_options
                         WHERE question_id = :qid
                         ORDER BY sort_order, id
@@ -140,6 +143,7 @@ def get_feedback_tasks_by_category(page_category: str) -> list:
                             'value': o[2],
                             'sort_order': o[3],
                             'requires_comment': bool(o[4]),
+                            'comment_hint': o[5] or '',
                         }
                         for o in cursor.fetchall()
                     ]
@@ -185,3 +189,85 @@ def has_feedback(student_id: int) -> bool:
             {'sid': student_id}
         )
         return cursor.fetchone()[0] > 0
+
+
+def delete_student_feedback(student_id: int) -> bool:
+    """删除学生已提交的全部反馈记录（删除后可重新填写）"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM feedback_responses WHERE student_id = :sid",
+            {'sid': student_id}
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_student_feedback(student_id: int) -> list:
+    """
+    获取学生已提交的反馈内容（按案例/类别分组连续排列）
+    返回 [{'page_category', 'group_title', 'question_text', 'answer_text'}]
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT fr.survey_question_id, fr.selected_option_id, fr.comment_text,
+                   fq.question_text, fq.question_type,
+                   ft.title, ft.page_category
+            FROM feedback_responses fr
+            JOIN feedback_questions fq ON fr.feedback_question_id = fq.id
+            JOIN feedback_tasks ft ON fq.task_id = ft.id
+            WHERE fr.student_id = :sid
+            ORDER BY fq.task_id, fq.sort_order, fq.id
+        """, {'sid': student_id})
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+
+        # 缓存选项 label 与案例标题，避免循环内反复查询
+        opt_labels = {}
+        case_titles = {}
+
+        items = []
+        for sqid, opt_id, comment_text, q_text, q_type, task_title, category in rows:
+            # 分组标题：案例反馈按案例标题，其他按任务标题
+            if category == 'case':
+                if sqid and sqid not in case_titles:
+                    cursor.execute("""
+                        SELECT c.title FROM case_questions cq
+                        JOIN cases c ON cq.case_id = c.id
+                        WHERE cq.id = :sqid
+                    """, {'sqid': sqid})
+                    row = cursor.fetchone()
+                    case_titles[sqid] = row[0] if row else None
+                group_title = case_titles.get(sqid) or task_title or '案例反馈'
+            else:
+                group_title = task_title or category
+
+            # 答案文本
+            answer_text = ''
+            if q_type == 'radio':
+                if opt_id:
+                    if opt_id not in opt_labels:
+                        cursor.execute(
+                            "SELECT label FROM feedback_question_options WHERE id = :oid",
+                            {'oid': opt_id})
+                        row = cursor.fetchone()
+                        opt_labels[opt_id] = row[0] if row else ''
+                    answer_text = opt_labels[opt_id]
+                if comment_text:
+                    answer_text = f'{answer_text}\n补充说明：{comment_text}'.strip()
+            else:
+                answer_text = comment_text or ''
+
+            items.append({
+                'page_category': category,
+                'group_title': group_title,
+                'question_text': q_text,
+                'answer_text': answer_text,
+            })
+
+        # 按类别顺序 + 分组标题排序，保证同组连续
+        category_order = {'case': 0, 'task_burden': 1, 'course_impact': 2, 'open_feedback': 3}
+        items.sort(key=lambda x: (category_order.get(x['page_category'], 9), x['group_title']))
+        return items

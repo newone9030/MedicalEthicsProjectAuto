@@ -146,7 +146,8 @@ def _create_sqlite_tables(conn):
             task_id INTEGER NOT NULL REFERENCES feedback_tasks(id) ON DELETE CASCADE,
             question_text TEXT NOT NULL,
             question_type VARCHAR2(10) NOT NULL DEFAULT 'radio',
-            sort_order INTEGER DEFAULT 0
+            sort_order INTEGER DEFAULT 0,
+            required INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS feedback_question_options (
@@ -155,7 +156,8 @@ def _create_sqlite_tables(conn):
             label TEXT NOT NULL,
             value INTEGER NOT NULL,
             sort_order INTEGER DEFAULT 0,
-            requires_comment INTEGER DEFAULT 0
+            requires_comment INTEGER DEFAULT 0,
+            comment_hint TEXT
         );
 
         CREATE TABLE IF NOT EXISTS feedback_task_mappings (
@@ -193,6 +195,22 @@ def _create_sqlite_tables(conn):
         cursor.execute("ALTER TABLE case_questions ADD COLUMN hint VARCHAR2(500)")
         conn.commit()
         print('[DB] 已添加 case_questions.hint 字段')
+
+    # 增量迁移：为反馈选项补充 comment_hint 字段
+    cursor.execute("PRAGMA table_info(feedback_question_options)")
+    opt_cols = [col[1] for col in cursor.fetchall()]
+    if 'comment_hint' not in opt_cols:
+        cursor.execute("ALTER TABLE feedback_question_options ADD COLUMN comment_hint TEXT")
+        conn.commit()
+        print('[DB] 已添加 feedback_question_options.comment_hint 字段')
+
+    # 增量迁移：为反馈题目补充 required 字段
+    cursor.execute("PRAGMA table_info(feedback_questions)")
+    q_cols = [col[1] for col in cursor.fetchall()]
+    if 'required' not in q_cols:
+        cursor.execute("ALTER TABLE feedback_questions ADD COLUMN required INTEGER DEFAULT 0")
+        conn.commit()
+        print('[DB] 已添加 feedback_questions.required 字段')
 
 
 def _init_oracle():

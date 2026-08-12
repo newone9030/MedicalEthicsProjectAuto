@@ -11,7 +11,7 @@ from app.db import get_connection
 def create_feedback_task(title: str, description: str = None,
                          page_category: str = 'case') -> dict:
     """创建反馈任务，返回 {'success': True/False, 'task_id': int, 'message': str}"""
-    valid_categories = ('case', 'task_burden', 'course_impact', 'system_privacy', 'open_feedback')
+    valid_categories = ('case', 'task_burden', 'course_impact', 'open_feedback')
     if page_category not in valid_categories:
         return {'success': False, 'message': f'无效的页面分类: {page_category}'}
 
@@ -45,7 +45,7 @@ def update_feedback_task(task_id: int, title: str = None,
             set_parts.append("description = :desc")
             params['desc'] = description
         if page_category is not None:
-            valid_categories = ('case', 'task_burden', 'course_impact', 'system_privacy', 'open_feedback')
+            valid_categories = ('case', 'task_burden', 'course_impact', 'open_feedback')
             if page_category not in valid_categories:
                 return {'success': False, 'message': f'无效的页面分类: {page_category}'}
             set_parts.append("page_category = :cat")
@@ -133,7 +133,7 @@ def get_feedback_task_detail(task_id: int) -> dict:
 
         # 获取题目
         cursor.execute("""
-            SELECT id, question_text, question_type, sort_order
+            SELECT id, question_text, question_type, sort_order, required
             FROM feedback_questions WHERE task_id = :tid
             ORDER BY sort_order, id
         """, {'tid': task_id})
@@ -144,12 +144,13 @@ def get_feedback_task_detail(task_id: int) -> dict:
                 'question_text': q[1],
                 'question_type': q[2],
                 'sort_order': q[3],
+                'required': bool(q[4]),
                 'options': [],
             }
             # 仅单选题目获取选项
             if q[2] == 'radio':
                 cursor.execute("""
-                    SELECT id, label, value, sort_order, requires_comment
+                    SELECT id, label, value, sort_order, requires_comment, comment_hint
                     FROM feedback_question_options WHERE question_id = :qid
                     ORDER BY sort_order, id
                 """, {'qid': q[0]})
@@ -160,6 +161,7 @@ def get_feedback_task_detail(task_id: int) -> dict:
                         'value': o[2],
                         'sort_order': o[3],
                         'requires_comment': bool(o[4]),
+                        'comment_hint': o[5] or '',
                     }
                     for o in cursor.fetchall()
                 ]
@@ -188,8 +190,9 @@ def get_feedback_task_detail(task_id: int) -> dict:
 # ==================== 反馈题目 CRUD ====================
 
 def add_feedback_question(task_id: int, question_text: str,
-                          question_type: str = 'radio') -> dict:
-    """添加反馈题目"""
+                          question_type: str = 'radio',
+                          required: int = 0) -> dict:
+    """添加反馈题目（required 仅对开放题生效）"""
     if question_type not in ('radio', 'open'):
         return {'success': False, 'message': '题目类型无效，仅支持 radio 或 open'}
 
@@ -208,16 +211,18 @@ def add_feedback_question(task_id: int, question_text: str,
         next_order = max_order + 1
 
         cursor.execute("""
-            INSERT INTO feedback_questions (task_id, question_text, question_type, sort_order)
-            VALUES (:tid, :qtext, :qtype, :sorder)
-        """, {'tid': task_id, 'qtext': question_text, 'qtype': question_type, 'sorder': next_order})
+            INSERT INTO feedback_questions (task_id, question_text, question_type, sort_order, required)
+            VALUES (:tid, :qtext, :qtype, :sorder, :req)
+        """, {'tid': task_id, 'qtext': question_text, 'qtype': question_type,
+              'sorder': next_order, 'req': 1 if required else 0})
         conn.commit()
         return {'success': True, 'message': '题目添加成功', 'question_id': cursor.lastrowid}
 
 
 def update_feedback_question(question_id: int, question_text: str = None,
-                             question_type: str = None) -> dict:
-    """更新反馈题目"""
+                             question_type: str = None,
+                             required: int = None) -> dict:
+    """更新反馈题目（required 仅对开放题生效）"""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM feedback_questions WHERE id = :qid", {'qid': question_id})
@@ -234,6 +239,9 @@ def update_feedback_question(question_id: int, question_text: str = None,
                 return {'success': False, 'message': '题目类型无效，仅支持 radio 或 open'}
             set_parts.append("question_type = :qtype")
             params['qtype'] = question_type
+        if required is not None:
+            set_parts.append("required = :req")
+            params['req'] = 1 if required else 0
 
         if set_parts:
             cursor.execute(f"UPDATE feedback_questions SET {', '.join(set_parts)} WHERE id = :qid", params)
@@ -261,7 +269,8 @@ def delete_feedback_question(question_id: int) -> dict:
 # ==================== 选项 CRUD ====================
 
 def add_feedback_option(question_id: int, label: str, value: int,
-                        sort_order: int = None, requires_comment: int = 0) -> dict:
+                        sort_order: int = None, requires_comment: int = 0,
+                        comment_hint: str = None) -> dict:
     """添加单选题选项"""
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -281,17 +290,19 @@ def add_feedback_option(question_id: int, label: str, value: int,
             sort_order = cursor.fetchone()[0] + 1
 
         cursor.execute("""
-            INSERT INTO feedback_question_options (question_id, label, value, sort_order, requires_comment)
-            VALUES (:qid, :label, :val, :sorder, :rcom)
+            INSERT INTO feedback_question_options (question_id, label, value, sort_order, requires_comment, comment_hint)
+            VALUES (:qid, :label, :val, :sorder, :rcom, :chint)
         """, {'qid': question_id, 'label': label, 'val': value,
-              'sorder': sort_order, 'rcom': requires_comment})
+              'sorder': sort_order, 'rcom': requires_comment,
+              'chint': comment_hint or None})
         conn.commit()
         return {'success': True, 'message': '选项添加成功', 'option_id': cursor.lastrowid}
 
 
 def update_feedback_option(option_id: int, label: str = None,
-                           value: int = None, requires_comment: int = None) -> dict:
-    """更新选项"""
+                           value: int = None, requires_comment: int = None,
+                           comment_hint: str = None) -> dict:
+    """更新选项（comment_hint 传空字符串可清空提示文字）"""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM feedback_question_options WHERE id = :oid", {'oid': option_id})
@@ -309,6 +320,9 @@ def update_feedback_option(option_id: int, label: str = None,
         if requires_comment is not None:
             set_parts.append("requires_comment = :rcom")
             params['rcom'] = requires_comment
+        if comment_hint is not None:
+            set_parts.append("comment_hint = :chint")
+            params['chint'] = comment_hint or None
 
         if set_parts:
             cursor.execute(f"UPDATE feedback_question_options SET {', '.join(set_parts)} WHERE id = :oid", params)

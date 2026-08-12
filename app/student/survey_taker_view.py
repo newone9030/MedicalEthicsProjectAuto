@@ -8,6 +8,7 @@ import flet as ft
 from app.task.task_service import get_task
 from app.case.question_service import get_questions_by_case
 from app.response.response_service import save_draft, submit_response, get_draft_answers, get_submitted_answers, get_submission_status
+from app.student.feedback_service import has_feedback
 
 
 def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly: bool = False) -> list:
@@ -83,6 +84,10 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
         page.overlay.append(snack)
         snack.open = True
         page.update()
+
+    def _navigate_to_feedback(_page):
+        """测试用户任务完成后，继续填写反馈任务"""
+        _page.go('/student/feedback')
 
     def _close_overlay_dlg(dialog):
         dialog.open = False
@@ -353,7 +358,12 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
 
                     if success_count == len(active_cases):
                         _show_snack(f'\u5168\u90E8 {success_count} \u4E2A\u6848\u4F8B\u5DF2\u63D0\u4EA4\u5B8C\u6210\uFF01')
-                        if on_back:
+                        # 测试用户完成任务后，继续填写反馈任务
+                        _user_info = page.session.store.get('user') or {}
+                        if (_user_info.get('user_type') == 'test'
+                                and not has_feedback(student_id)):
+                            _navigate_to_feedback(page)
+                        elif on_back:
                             on_back()
                     elif success_count > 0:
                         _show_snack(f'\u5DF2\u63D0\u4EA4 {success_count}/{len(active_cases)} \u4E2A\u6848\u4F8B\uFF0C\u8BF7\u91CD\u8BD5\u5931\u8D25\u7684\u6848\u4F8B')
