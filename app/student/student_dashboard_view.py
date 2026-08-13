@@ -5,7 +5,7 @@
 from datetime import datetime
 import threading
 import flet as ft
-from app.task.task_service import get_active_task_for_student, get_background_task
+from app.task.task_service import get_active_tasks_for_student, get_background_task
 from app.response.response_service import get_submission_status, delete_student_responses, delete_background_survey_responses, is_background_completed
 from app.student.feedback_service import has_feedback, get_student_feedback, delete_student_feedback
 
@@ -19,7 +19,7 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
 
     def refresh_task():
         try:
-            task = get_active_task_for_student(student_id)
+            tasks = get_active_tasks_for_student(student_id)
         except Exception as ex:
             task_container.controls.clear()
             task_container.controls.append(
@@ -34,7 +34,7 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
                     expand=True,
                 )
             )
-            if task_container.page:
+            if task_container.parent is not None:
                 task_container.update()
             return
 
@@ -48,27 +48,36 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
             )
             task_container.controls.append(ft.Divider(height=15, color='transparent'))
 
-        if not task:
+        if not tasks:
             _build_empty_state(task_container)
         else:
-            statuses = get_submission_status(task['id'], student_id)
-            all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
-            task_container.controls.append(
-                _build_task_card(task, statuses, page, on_enter_task, all_submitted, student_id, refresh_task)
-            )
+            # 展示所有进行中的任务
+            for task in tasks:
+                statuses = get_submission_status(task['id'], student_id)
+                all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
+                task_container.controls.append(
+                    _build_task_card(task, statuses, page, on_enter_task, all_submitted, student_id, refresh_task)
+                )
+                task_container.controls.append(ft.Divider(height=15, color='transparent'))
 
             # 历史任务（已关闭的）
             _add_history_tasks(task_container, student_id, page, on_enter_task)
 
         # 测试用户反馈入口（无论活跃任务是否存在，检查条件）
-        _maybe_add_feedback_entry(task_container, page, student_id, user, task, bg_task,
+        _maybe_add_feedback_entry(task_container, page, student_id, user, tasks, bg_task,
                                   refresh_cb=refresh_task)
 
-        if task_container.page:
+        if task_container.parent is not None:
             task_container.update()
 
-    # 控件挂载后延迟加载数据
-    threading.Timer(0.3, refresh_task).start()
+    # 控件挂载后再加载数据（页面控件加载完成前不调用任何方法）
+    def _schedule_refresh():
+        if task_container.parent is None:
+            threading.Timer(0.05, _schedule_refresh).start()
+            return
+        refresh_task()
+
+    _schedule_refresh()
 
     return [
         ft.Column([
@@ -487,12 +496,12 @@ def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_
 
 
 def _maybe_add_feedback_entry(container: ft.Column, page: ft.Page, student_id: int,
-                               user: dict, task: dict, bg_task: dict,
+                               user: dict, tasks: list, bg_task: dict,
                                refresh_cb=None):
     """
     测试用户反馈区：
     - 已提交反馈 → 显示"查看反馈/删除反馈"卡片
-    - 未提交反馈且（背景已完成 + 所有任务已提交）→ 显示"进入反馈"卡片
+    - 未提交反馈且（背景已完成 + 所有进行中任务已提交）→ 显示"进入反馈"卡片
     """
     if user.get('user_type') != 'test':
         return
@@ -513,13 +522,14 @@ def _maybe_add_feedback_entry(container: ft.Column, page: ft.Page, student_id: i
     if not bg_completed:
         return
 
-    # 检查活跃任务
-    if task:
-        statuses = get_submission_status(task['id'], student_id)
-        all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
-        if not all_submitted:
-            return
-    # 如果没有活跃任务（可能任务已关闭），也显示入口
+    # 检查进行中的任务（全部已提交才显示入口）
+    if tasks:
+        for task in tasks:
+            statuses = get_submission_status(task['id'], student_id)
+            all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
+            if not all_submitted:
+                return
+    # 如果没有进行中任务（可能任务已关闭），也显示入口
 
     container.controls.append(ft.Divider(height=15, color='transparent'))
     container.controls.append(_build_feedback_entry_card(page))

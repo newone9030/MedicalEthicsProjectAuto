@@ -45,7 +45,7 @@ def save_draft(task_id: int, case_id: int, student_id: int, answers: dict) -> di
 
         # 写入答案明细
         for question_id, answer in answers.items():
-            answer_val = json.dumps(answer, ensure_ascii=False) if isinstance(answer, list) else str(answer) if answer is not None else ''
+            answer_val = json.dumps(answer, ensure_ascii=False) if isinstance(answer, (list, dict)) else str(answer) if answer is not None else ''
             cursor.execute("""
                 INSERT INTO response_details (response_id, question_id, answer)
                 VALUES (:rid, :qid, :ans)
@@ -123,7 +123,7 @@ def submit_response(task_id: int, case_id: int, student_id: int, answers: dict,
 
         # 写入答案明细
         for question_id, answer in answers.items():
-            answer_val = json.dumps(answer, ensure_ascii=False) if isinstance(answer, list) else str(answer) if answer is not None else ''
+            answer_val = json.dumps(answer, ensure_ascii=False) if isinstance(answer, (list, dict)) else str(answer) if answer is not None else ''
             cursor.execute("""
                 INSERT INTO response_details (response_id, question_id, answer)
                 VALUES (:rid, :qid, :ans)

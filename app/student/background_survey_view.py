@@ -71,10 +71,15 @@ def build_background_survey_view(
             if qtype == 'single_choice':
                 radio_items = []
                 for opt in options:
-                    radio = ft.Radio(value=opt, label=opt, fill_color='#1976D2')
+                    # 兼容旧字符串选项/新对象选项
+                    label = opt.get('label', '') if isinstance(opt, dict) else str(opt)
+                    radio = ft.Radio(value=label, label=label, fill_color='#1976D2')
                     radio_items.append(radio)
 
                 draft_answer = draft_info.get('answer', '')
+                if isinstance(draft_answer, dict):
+                    # 任务作答端可能保存了 dict 答案
+                    draft_answer = draft_answer.get('option', '')
                 rg = ft.RadioGroup(
                     value=draft_answer or '',
                     content=ft.Column(radio_items, spacing=4),
@@ -86,32 +91,54 @@ def build_background_survey_view(
                 choice_controls = []
             elif qtype == 'multiple_choice':
                 draft_answer = draft_info.get('answer', '')
+                draft_open_text = ''
                 if isinstance(draft_answer, str):
                     try:
-                        draft_answer = json.loads(draft_answer)
+                        parsed = json.loads(draft_answer)
                     except json.JSONDecodeError:
-                        draft_answer = [draft_answer] if draft_answer else []
+                        parsed = [draft_answer] if draft_answer else []
+                    draft_answer = parsed
+                if isinstance(draft_answer, dict):
+                    # 新 dict 答案: {'options': [...], 'open_text': '...'}
+                    draft_open_text = draft_answer.get('open_text', '') or ''
+                    draft_answer = draft_answer.get('options', []) if isinstance(draft_answer.get('options'), list) else []
                 if not isinstance(draft_answer, list):
                     draft_answer = []
 
                 checkboxes = {}
                 check_items = []
                 for opt in options:
-                    cb = ft.Checkbox(value=opt in draft_answer, fill_color='#1976D2')
-                    checkboxes[opt] = cb
+                    # 兼容旧字符串选项/新对象选项
+                    label = opt.get('label', '') if isinstance(opt, dict) else str(opt)
+                    cb = ft.Checkbox(value=label in draft_answer, fill_color='#1976D2')
+                    checkboxes[label] = cb
                     bg_container = ft.Container(
                         content=ft.Row([
                             cb,
-                            ft.Text(opt, size=16, color='#212121',
+                            ft.Text(label, size=16, color='#212121',
                                     overflow=ft.TextOverflow.VISIBLE, expand=True,
                                     no_wrap=False),
                         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START,
                            expand=True),
                         padding=ft.Padding(8, 6, 8, 6),
                         border_radius=8,
-                        bgcolor='#E3F2FD' if opt in draft_answer else None,
+                        bgcolor='#E3F2FD' if label in draft_answer else None,
                     )
                     check_items.append(bg_container)
+
+                # 题目级开放式文本框（一道多选题仅一个）
+                multi_open_enabled = bool(q.get('open_text_enabled', False))
+                multi_open_title = q.get('open_text_title', '') or ''
+                multi_open_hint = q.get('open_text_hint', '') or ''
+                multi_open_ctrl = None
+                if multi_open_enabled:
+                    multi_open_ctrl = ft.TextField(
+                        value=draft_open_text,
+                        multiline=True, min_lines=2, max_lines=4,
+                        hint_text=multi_open_hint or '请输入补充说明...',
+                        border_radius=8, text_size=15,
+                        border_color='#BBDEFB',
+                    )
 
                 answer_ctrl = None
                 answer_items_list = check_items
@@ -138,6 +165,8 @@ def build_background_survey_view(
                 'answer_ctrl': answer_ctrl,
                 'choice_controls': choice_controls,
                 'answer_items_list': answer_items_list if qtype in ('single_choice', 'multiple_choice') else [],
+                'multi_open_ctrl': multi_open_ctrl if qtype == 'multiple_choice' else None,
+                'multi_open_title': multi_open_title if qtype == 'multiple_choice' else '',
             }
             if qtype == 'multiple_choice':
                 entry['checkboxes_map'] = checkboxes_map
@@ -165,6 +194,13 @@ def build_background_survey_view(
         elif qtype == 'multiple_choice':
             cbs = qd.get('choice_controls', {})
             selected = [label for label, cb in cbs.items() if cb.value]
+            multi_open_ctrl = qd.get('multi_open_ctrl')
+            if multi_open_ctrl is not None:
+                # 启用开放式文本框：答案保存为 dict {'options': [...], 'open_text': '...'}
+                open_text = (multi_open_ctrl.value or '').strip()
+                if selected or open_text:
+                    return json.dumps({'options': selected, 'open_text': open_text}, ensure_ascii=False)
+                return ''
             return json.dumps(selected, ensure_ascii=False) if selected else ''
         else:
             return (qd['answer_ctrl'].value or '').strip()
@@ -176,7 +212,12 @@ def build_background_survey_view(
             return bool(qd['answer_ctrl'].value)
         elif qtype == 'multiple_choice':
             cbs = qd.get('choice_controls', {})
-            return any(cb.value for cb in cbs.values())
+            if any(cb.value for cb in cbs.values()):
+                return True
+            multi_open_ctrl = qd.get('multi_open_ctrl')
+            if multi_open_ctrl is not None and (multi_open_ctrl.value or '').strip():
+                return True
+            return False
         else:
             return bool(qd['answer_ctrl'].value and qd['answer_ctrl'].value.strip())
 
@@ -247,6 +288,25 @@ def build_background_survey_view(
                 if items_list:
                     answer_area.append(
                         ft.Column(items_list, spacing=4)
+                    )
+                # 题目级开放式文本框（一道多选题仅一个）
+                multi_open_ctrl = qd.get('multi_open_ctrl')
+                if multi_open_ctrl is not None:
+                    answer_area.append(
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Icon(ft.Icons.EDIT_NOTE, size=16, color='#1976D2'),
+                                    ft.Text(qd.get('multi_open_title') or '开放式文本框', size=15,
+                                            weight=ft.FontWeight.W_600, color='#1976D2'),
+                                ], spacing=4),
+                                multi_open_ctrl,
+                            ], spacing=4),
+                            bgcolor='#F5F9FF',
+                            border_radius=8,
+                            border=ft.Border.all(width=1, color='#BBDEFB'),
+                            padding=ft.Padding(10, 8, 10, 8),
+                        )
                     )
 
             question_rows.append(

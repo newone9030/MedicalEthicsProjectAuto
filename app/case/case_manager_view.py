@@ -243,6 +243,9 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                 'sort_order': len(questions),
                 'is_new': True,
                 'hint': '',
+                'open_text_enabled': False,
+                'open_text_title': '',
+                'open_text_hint': '',
             }
             questions.append(new_q)
             question_container.controls.append(_build_question_card(new_q, len(questions) - 1, refresh_questions, questions, refresh_single_question))
@@ -267,21 +270,58 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
         type_val = q_type_dropdown.value if isinstance(q_type_dropdown, ft.Dropdown) else 'single_choice'
         # controls[3] = options_column
         opts = []
+        open_text_enabled = False
+        open_text_title = ''
+        open_text_hint = ''
         if type_val != 'open' and len(card_col.controls) > 3:
             options_col = card_col.controls[3]
             if isinstance(options_col, ft.Column):
                 for opt_ctrl in options_col.controls:
-                    if isinstance(opt_ctrl, ft.Row) and opt_ctrl.controls:
+                    if isinstance(opt_ctrl, ft.Column) and opt_ctrl.controls:
+                        # 单选题选项块：controls[0]=Row([label, checkbox, delete])，controls[1]=提示输入框
+                        first_row = opt_ctrl.controls[0]
+                        if isinstance(first_row, ft.Row) and first_row.controls:
+                            opt_field = first_row.controls[0]
+                            if isinstance(opt_field, ft.TextField):
+                                label = (opt_field.value or '').strip()
+                                open_check = first_row.controls[1] if len(first_row.controls) > 1 and isinstance(first_row.controls[1], ft.Checkbox) else None
+                                hint_field = opt_ctrl.controls[1] if len(opt_ctrl.controls) > 1 and isinstance(opt_ctrl.controls[1], ft.TextField) else None
+                                opts.append({
+                                    'label': label,
+                                    'requires_open': bool(open_check.value) if open_check else False,
+                                    'open_hint': (hint_field.value or '').strip() if hint_field else '',
+                                })
+                    elif isinstance(opt_ctrl, ft.Row) and opt_ctrl.controls:
+                        # 多选题选项行：Row([label, delete])
                         opt_field = opt_ctrl.controls[0]
                         if isinstance(opt_field, ft.TextField):
                             opts.append((opt_field.value or '').strip())
+                    elif isinstance(opt_ctrl, ft.Container):
+                        # 多选题开放式文本框配置区
+                        inner = opt_ctrl.content if isinstance(opt_ctrl.content, ft.Column) else None
+                        if inner:
+                            for sub in inner.controls:
+                                if isinstance(sub, ft.Checkbox) and sub.key == 'multi_open_check':
+                                    open_text_enabled = bool(sub.value)
+                                elif isinstance(sub, ft.TextField) and sub.key == 'multi_open_title':
+                                    open_text_title = (sub.value or '').strip()
+                                elif isinstance(sub, ft.TextField) and sub.key == 'multi_open_hint':
+                                    open_text_hint = (sub.value or '').strip()
         # Find hint field (key='hint_field')
         hint_val = ''
         for ctrl in card_col.controls:
             if isinstance(ctrl, ft.TextField) and hasattr(ctrl, 'key') and ctrl.key == 'hint_field':
                 hint_val = (ctrl.value or '').strip()
                 break
-        return {'title': title_val, 'type': type_val, 'options': opts, 'hint': hint_val}
+        return {
+            'title': title_val,
+            'type': type_val,
+            'options': opts,
+            'hint': hint_val,
+            'open_text_enabled': open_text_enabled,
+            'open_text_title': open_text_title,
+            'open_text_hint': open_text_hint,
+        }
 
     def _show_sn(msg: str, success: bool = True):
         snack = ft.SnackBar(ft.Text(msg), bgcolor='#4CAF50' if success else '#FF5252')
@@ -320,17 +360,26 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         new_type = q_data['type']
                         new_options = q_data['options'] if q_data['options'] else None
                         new_hint = q_data.get('hint', '') or None
+                        open_enabled = bool(q_data.get('open_text_enabled', False))
+                        open_title = q_data.get('open_text_title', '') or None
+                        open_hint = q_data.get('open_text_hint', '') or None
 
                         if q.get('is_new', False):
                             # 新增的题目：先插入数据库
                             add_result = add_question(case_id, new_title, new_type,
-                                                      options=new_options, sort_order=idx, hint=new_hint)
+                                                      options=new_options, sort_order=idx, hint=new_hint,
+                                                      open_text_enabled=open_enabled,
+                                                      open_text_title=open_title,
+                                                      open_text_hint=open_hint)
                             if add_result['success']:
                                 q['id'] = add_result['question_id']
                                 q['is_new'] = False
                         else:
                             # 已有的题目：直接更新
-                            update_question(q['id'], new_title, new_type, options=new_options, hint=new_hint)
+                            update_question(q['id'], new_title, new_type, options=new_options, hint=new_hint,
+                                            open_text_enabled=open_enabled,
+                                            open_text_title=open_title,
+                                            open_text_hint=open_hint)
             else:
                 user = page.session.store.get('user')
                 result = create_case(title, '', '', user['id'])
@@ -343,7 +392,10 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         if q_data and q_data['title']:
                             add_question(new_case_id, q_data['title'], q_data['type'], 
                                         options=q_data['options'] if q_data['options'] else [],
-                                        sort_order=idx, hint=q_data.get('hint', '') or None)
+                                        sort_order=idx, hint=q_data.get('hint', '') or None,
+                                        open_text_enabled=bool(q_data.get('open_text_enabled', False)),
+                                        open_text_title=q_data.get('open_text_title', '') or None,
+                                        open_text_hint=q_data.get('open_text_hint', '') or None)
 
             if result['success']:
                 # 将成功消息存入 session，由列表页读取并显示
@@ -467,27 +519,79 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
 
     # 选项编辑器（仅单选和多选显示）
     options_column = ft.Column(spacing=4)
+    is_single = question['question_type'] == 'single_choice'
+    is_multi = question['question_type'] == 'multiple_choice'
+    multi_open_enabled = bool(question.get('open_text_enabled', False))
 
     def build_options():
         options_column.controls.clear()
         if question['question_type'] in ('single_choice', 'multiple_choice'):
             opts = question.get('options', [])
             for i, opt in enumerate(opts):
-                opt_field = ft.Row([
-                    ft.TextField(
-                        value=opt,
+                # 兼容旧字符串选项与新对象选项
+                if isinstance(opt, dict):
+                    label = opt.get('label', '')
+                    requires_open = bool(opt.get('requires_open', False))
+                    open_hint = opt.get('open_hint', '')
+                else:
+                    label = str(opt)
+                    requires_open = False
+                    open_hint = ''
+
+                if is_single:
+                    # 单选题：选项文本 + “开放式文本框”开关 + 提示内容 + 删除
+                    hint_input = ft.TextField(
+                        value=open_hint,
                         dense=True,
+                        label='开放文本框提示',
+                        hint_text='选择该选项时显示的补充文本框提示',
                         border_color='#E0E0E0',
-                        expand=True,
-                        on_change=lambda e, idx=i, q=qid: _on_option_change(q, idx, e.control.value, temp_questions),
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
-                        icon_color='#FF5252',
-                        icon_size=20,
-                        on_click=lambda e, idx=i, q=qid: _remove_option(q, idx, on_refresh, temp_questions),
-                    ),
-                ], spacing=4)
+                        visible=requires_open,
+                        on_change=lambda e, idx=i, q=qid: _on_option_hint_change(q, idx, e.control.value, temp_questions),
+                    )
+                    open_check = ft.Checkbox(
+                        label='开放式文本框',
+                        value=requires_open,
+                        fill_color='#1976D2',
+                        on_change=lambda e, idx=i, q=qid, h=hint_input: _on_option_open_change(
+                            q, idx, bool(e.control.value), h, temp_questions),
+                    )
+                    opt_field = ft.Column([
+                        ft.Row([
+                            ft.TextField(
+                                value=label,
+                                dense=True,
+                                border_color='#E0E0E0',
+                                expand=True,
+                                on_change=lambda e, idx=i, q=qid: _on_option_change(q, idx, e.control.value, temp_questions),
+                            ),
+                            open_check,
+                            ft.IconButton(
+                                icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                                icon_color='#FF5252',
+                                icon_size=20,
+                                on_click=lambda e, idx=i, q=qid: _remove_option(q, idx, on_refresh, temp_questions),
+                            ),
+                        ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        hint_input,
+                    ], spacing=2)
+                else:
+                    # 多选题：仅选项文本 + 删除
+                    opt_field = ft.Row([
+                        ft.TextField(
+                            value=label,
+                            dense=True,
+                            border_color='#E0E0E0',
+                            expand=True,
+                            on_change=lambda e, idx=i, q=qid: _on_option_change(q, idx, e.control.value, temp_questions),
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                            icon_color='#FF5252',
+                            icon_size=20,
+                            on_click=lambda e, idx=i, q=qid: _remove_option(q, idx, on_refresh, temp_questions),
+                        ),
+                    ], spacing=4)
                 options_column.controls.append(opt_field)
             # 添加选项按钮
             options_column.controls.append(
@@ -497,6 +601,46 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
                     style=ft.ButtonStyle(color='#1976D2'),
                 )
             )
+            # 多选题：题目级开放式文本框配置区（一道多选题仅一个）
+            if is_multi:
+                multi_open_title_field = ft.TextField(
+                    value=question.get('open_text_title', ''),
+                    dense=True,
+                    label='开放式文本框标题',
+                    hint_text='显示在文本框上方的标题栏',
+                    border_color='#E0E0E0',
+                    visible=multi_open_enabled,
+                    key='multi_open_title',
+                    on_change=lambda e, q=qid: _on_multi_open_title_change(q, e.control.value, temp_questions),
+                )
+                multi_open_hint_field = ft.TextField(
+                    value=question.get('open_text_hint', ''),
+                    dense=True,
+                    label='开放式文本框录入提示',
+                    hint_text='作答者输入时的提示文字',
+                    border_color='#E0E0E0',
+                    visible=multi_open_enabled,
+                    key='multi_open_hint',
+                    on_change=lambda e, q=qid: _on_multi_open_hint_change(q, e.control.value, temp_questions),
+                )
+                multi_open_check = ft.Checkbox(
+                    label='添加开放式文本框',
+                    value=multi_open_enabled,
+                    fill_color='#1976D2',
+                    key='multi_open_check',
+                    on_change=lambda e, t=multi_open_title_field, h=multi_open_hint_field, q=qid: _on_multi_open_enabled_change(
+                        q, bool(e.control.value), t, h, temp_questions),
+                )
+                options_column.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Divider(height=4, color='transparent'),
+                            multi_open_check,
+                            multi_open_title_field,
+                            multi_open_hint_field,
+                        ], spacing=4),
+                    )
+                )
         else:
             options_column.controls.append(
                 ft.TextField(
@@ -519,7 +663,9 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
         border_color='#E0E0E0',
         focused_border_color='#1976D2',
         text_style=ft.TextStyle(size=12),
-        dense=True,
+        multiline=True,
+        min_lines=2,
+        max_lines=4,
         key='hint_field',
     )
 
@@ -591,37 +737,55 @@ def _on_question_type_change(question_id: int, new_type: str, question_index: in
             row = cursor.fetchone()
             if row:
                 if new_type == 'single_choice':
-                    opts = ['选项A']
+                    opts = [_option_as_obj({'label': '选项A'})]
                 elif new_type == 'multiple_choice':
-                    opts = ['选项A', '选项B']
+                    opts = [_option_as_obj({'label': '选项A'}), _option_as_obj({'label': '选项B'})]
                 else:
                     opts = None
-                update_question(question_id, row[0], new_type, options=opts, hint=row[2])
+                update_question(question_id, row[0], new_type, options=opts, hint=row[2],
+                                open_text_enabled=False, open_text_title='', open_text_hint='')
         # 更新内存中的题目数据
         for q in temp_questions:
             if q['id'] == question_id:
                 q['question_type'] = new_type
                 if new_type == 'single_choice':
-                    q['options'] = ['选项A']
+                    q['options'] = [_option_as_obj({'label': '选项A'})]
                 elif new_type == 'multiple_choice':
-                    q['options'] = ['选项A', '选项B']
+                    q['options'] = [_option_as_obj({'label': '选项A'}), _option_as_obj({'label': '选项B'})]
                 else:
                     q['options'] = []
+                q['open_text_enabled'] = False
+                q['open_text_title'] = ''
+                q['open_text_hint'] = ''
                 break
     elif temp_questions:
         for q in temp_questions:
             if q['id'] == question_id:
                 q['question_type'] = new_type
                 if new_type == 'single_choice':
-                    q['options'] = ['选项A']
+                    q['options'] = [_option_as_obj({'label': '选项A'})]
                 elif new_type == 'multiple_choice':
-                    q['options'] = ['选项A', '选项B']
+                    q['options'] = [_option_as_obj({'label': '选项A'}), _option_as_obj({'label': '选项B'})]
                 else:
                     q['options'] = []
+                q['open_text_enabled'] = False
+                q['open_text_title'] = ''
+                q['open_text_hint'] = ''
                 break
     # 只重建当前卡片（延迟执行，避免在事件处理中销毁控件）
     if on_single_refresh:
         threading.Timer(0.05, lambda: on_single_refresh(question_index)).start()
+
+
+def _option_as_obj(opt):
+    """将选项统一为对象格式（兼容旧字符串）"""
+    if isinstance(opt, dict):
+        return {
+            'label': str(opt.get('label', opt.get('text', ''))),
+            'requires_open': bool(opt.get('requires_open', False)),
+            'open_hint': str(opt.get('open_hint', '') or ''),
+        }
+    return {'label': str(opt), 'requires_open': False, 'open_hint': ''}
 
 
 def _on_option_change(question_id: int, option_idx: int, new_value: str, temp_questions=None):
@@ -634,7 +798,8 @@ def _on_option_change(question_id: int, option_idx: int, new_value: str, temp_qu
             if row and row[2]:
                 opts = json.loads(row[2])
                 if option_idx < len(opts):
-                    opts[option_idx] = new_value
+                    opts[option_idx] = _option_as_obj(opts[option_idx])
+                    opts[option_idx]['label'] = new_value
                     update_question(question_id, row[0], row[1], options=opts, hint=row[3])
     # 无论新建还是编辑模式，都要更新内存中的题目列表
     if temp_questions:
@@ -642,8 +807,141 @@ def _on_option_change(question_id: int, option_idx: int, new_value: str, temp_qu
             if q['id'] == question_id:
                 opts = q.get('options', [])
                 if option_idx < len(opts):
-                    opts[option_idx] = new_value
+                    opts[option_idx] = _option_as_obj(opts[option_idx])
+                    opts[option_idx]['label'] = new_value
                     q['options'] = opts
+                break
+
+
+def _on_option_open_change(question_id: int, option_idx: int, new_value: bool, hint_input, temp_questions=None):
+    """选项“开放式文本框”开关变更：更新数据，并同步提示输入框可见性"""
+    # 先同步提示输入框可见性
+    if hint_input is not None:
+        hint_input.visible = bool(new_value)
+    if question_id > 0:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT question_text, question_type, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
+            row = cursor.fetchone()
+            if row and row[2]:
+                opts = json.loads(row[2])
+                if option_idx < len(opts):
+                    opts[option_idx] = _option_as_obj(opts[option_idx])
+                    opts[option_idx]['requires_open'] = bool(new_value)
+                    update_question(question_id, row[0], row[1], options=opts, hint=row[3])
+    if temp_questions:
+        for q in temp_questions:
+            if q['id'] == question_id:
+                opts = q.get('options', [])
+                if option_idx < len(opts):
+                    opts[option_idx] = _option_as_obj(opts[option_idx])
+                    opts[option_idx]['requires_open'] = bool(new_value)
+                    q['options'] = opts
+                break
+    if hint_input is not None:
+        try:
+            hint_input.update()
+        except Exception:
+            pass
+
+
+def _on_option_hint_change(question_id: int, option_idx: int, new_value: str, temp_questions=None):
+    """选项开放式文本框提示内容变更"""
+    if question_id > 0:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT question_text, question_type, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
+            row = cursor.fetchone()
+            if row and row[2]:
+                opts = json.loads(row[2])
+                if option_idx < len(opts):
+                    opts[option_idx] = _option_as_obj(opts[option_idx])
+                    opts[option_idx]['open_hint'] = new_value
+                    update_question(question_id, row[0], row[1], options=opts, hint=row[3])
+    if temp_questions:
+        for q in temp_questions:
+            if q['id'] == question_id:
+                opts = q.get('options', [])
+                if option_idx < len(opts):
+                    opts[option_idx] = _option_as_obj(opts[option_idx])
+                    opts[option_idx]['open_hint'] = new_value
+                    q['options'] = opts
+                break
+
+
+def _on_multi_open_enabled_change(question_id: int, new_value: bool, title_field, hint_field, temp_questions=None):
+    """多选题“添加开放式文本框”开关变更：更新数据，并同步标题/提示输入框可见性"""
+    if title_field is not None:
+        title_field.visible = bool(new_value)
+    if hint_field is not None:
+        hint_field.visible = bool(new_value)
+    if question_id > 0:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT question_text, question_type, options, hint FROM case_questions WHERE id = :qid", {'qid': question_id})
+            row = cursor.fetchone()
+            if row:
+                update_question(question_id, row[0], row[1], options=json.loads(row[2]) if row[2] else [],
+                                hint=row[3],
+                                open_text_enabled=bool(new_value),
+                                open_text_title=(title_field.value or '') if title_field else '',
+                                open_text_hint=(hint_field.value or '') if hint_field else '')
+    if temp_questions:
+        for q in temp_questions:
+            if q['id'] == question_id:
+                q['open_text_enabled'] = bool(new_value)
+                q['open_text_title'] = (title_field.value or '') if title_field else ''
+                q['open_text_hint'] = (hint_field.value or '') if hint_field else ''
+                break
+    if title_field is not None:
+        try:
+            title_field.update()
+        except Exception:
+            pass
+    if hint_field is not None:
+        try:
+            hint_field.update()
+        except Exception:
+            pass
+
+
+def _on_multi_open_title_change(question_id: int, new_value: str, temp_questions=None):
+    """多选题开放式文本框标题栏变更"""
+    if question_id > 0:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT question_text, question_type, options, hint, open_text_enabled, open_text_hint FROM case_questions WHERE id = :qid", {'qid': question_id})
+            row = cursor.fetchone()
+            if row:
+                update_question(question_id, row[0], row[1], options=json.loads(row[2]) if row[2] else [],
+                                hint=row[3],
+                                open_text_enabled=bool(row[4]),
+                                open_text_title=new_value,
+                                open_text_hint=row[5] or '')
+    if temp_questions:
+        for q in temp_questions:
+            if q['id'] == question_id:
+                q['open_text_title'] = new_value
+                break
+
+
+def _on_multi_open_hint_change(question_id: int, new_value: str, temp_questions=None):
+    """多选题开放式文本框录入提示变更"""
+    if question_id > 0:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT question_text, question_type, options, hint, open_text_enabled, open_text_title FROM case_questions WHERE id = :qid", {'qid': question_id})
+            row = cursor.fetchone()
+            if row:
+                update_question(question_id, row[0], row[1], options=json.loads(row[2]) if row[2] else [],
+                                hint=row[3],
+                                open_text_enabled=bool(row[4]),
+                                open_text_title=row[5] or '',
+                                open_text_hint=new_value)
+    if temp_questions:
+        for q in temp_questions:
+            if q['id'] == question_id:
+                q['open_text_hint'] = new_value
                 break
 
 
@@ -656,17 +954,37 @@ def _add_option(question_id: int, on_refresh, temp_questions=None):
             row = cursor.fetchone()
             if row:
                 opts = json.loads(row[2]) if row[2] else []
-                opts.append(f'选项{chr(65 + len(opts))}')  # 选项A, B, C...
+                opts.append(_option_as_obj({'label': f'选项{chr(65 + len(opts))}', 'requires_open': False, 'open_hint': ''}))
                 update_question(question_id, row[0], row[1], options=opts, hint=row[3])
     elif temp_questions:
         # 新建模式：更新临时 questions 列表
         for q in temp_questions:
             if q['id'] == question_id:
                 opts = q.get('options', [])
-                opts.append(f'选项{chr(65 + len(opts))}')
+                opts.append(_option_as_obj({'label': f'选项{chr(65 + len(opts))}', 'requires_open': False, 'open_hint': ''}))
                 q['options'] = opts
                 break
     threading.Timer(0.05, on_refresh).start()
+
+
+def _raw_options_of(question_id: int, temp_questions=None) -> list:
+    """读取题目当前选项（原始 JSON 数组或临时列表），供 _add_option 计算新标签"""
+    if question_id > 0:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT options FROM case_questions WHERE id = :qid", {'qid': question_id})
+            row = cursor.fetchone()
+            if row and row[0]:
+                try:
+                    return json.loads(row[0])
+                except (json.JSONDecodeError, TypeError):
+                    return []
+            return []
+    if temp_questions:
+        for q in temp_questions:
+            if q['id'] == question_id:
+                return q.get('options', [])
+    return []
 
 
 def _remove_option(question_id: int, option_idx: int, on_refresh, temp_questions=None):

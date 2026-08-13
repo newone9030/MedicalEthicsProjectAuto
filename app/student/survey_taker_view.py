@@ -4,6 +4,7 @@
 页面控件先加载，数据通过 page.run_task 延迟加载
 """
 import json
+import threading
 import flet as ft
 from app.task.task_service import get_task
 from app.case.question_service import get_questions_by_case
@@ -222,7 +223,9 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
             # ---- 内部函数：进度统计 ----
             def count_completed():
                 return sum(1 for key, val in all_answers.items()
-                           if val is not None and val != '' and (not isinstance(val, list) or len(val) > 0))
+                           if val is not None and val != '' and
+                           (not isinstance(val, (list, dict)) or len(val) > 0) and
+                           not (isinstance(val, dict) and not val.get('options') and not val.get('open_text')))
 
             def update_progress():
                 completed = count_completed()
@@ -316,7 +319,9 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     for q in questions:
                         key = f"{case['id']}_{q['id']}"
                         ans = all_answers.get(key)
-                        if ans is None or ans == '' or (isinstance(ans, list) and len(ans) == 0):
+                        if (ans is None or ans == '' or
+                                (isinstance(ans, list) and len(ans) == 0) or
+                                (isinstance(ans, dict) and not ans.get('options') and not ans.get('open_text'))):
                             case_unanswered.append((case['title'], q['question_text'][:30]))
                         else:
                             case_answers[q['id']] = ans
@@ -437,8 +442,14 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
             case_label.value = ''
             page.update()
 
-    # 调度数据加载任务（在控件挂载后执行）
-    page.run_task(init_data)
+    # 调度数据加载任务：等待页面控件加载完成后才执行（挂载前不调用任何方法）
+    def _schedule_init():
+        if question_container.parent is None:
+            threading.Timer(0.05, _schedule_init).start()
+            return
+        page.run_task(init_data)
+
+    _schedule_init()
 
     # ================================================================
     # Phase 3: 立即返回 UI 骨架
@@ -485,7 +496,8 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
 
     is_unanswered = not readonly and (
         current_val is None or current_val == '' or
-        (isinstance(current_val, list) and len(current_val) == 0)
+        (isinstance(current_val, list) and len(current_val) == 0) or
+        (isinstance(current_val, dict) and not current_val.get('options') and not current_val.get('open_text'))
     )
     border_color = '#FF5252' if is_unanswered else '#E0E0E0'
 
@@ -497,39 +509,102 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
         if not opts:
             content = ft.Text('(无选项)', size=15, color='#9E9E9E', italic=True)
         else:
-            radio_items = []
-            for opt in opts:
-                is_selected = current_val == opt
-                radio_items.append(
-                    ft.Container(
-                        content=ft.Row([
-                            ft.Icon(
-                                ft.Icons.RADIO_BUTTON_CHECKED if is_selected else ft.Icons.RADIO_BUTTON_UNCHECKED,
-                                color='#1976D2' if is_selected else '#757575',
-                                size=20,
-                            ),
-                            ft.Text(opt, size=16, color='#212121',
-                                    overflow=ft.TextOverflow.VISIBLE, expand=True,
-                                    no_wrap=False),
-                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
-                        on_click=None if readonly else (lambda e, o=opt: _on_choice_select(o, key, answers)),
-                        padding=ft.Padding(8, 6, 8, 6),
-                        border_radius=8,
-                        bgcolor='#E3F2FD' if is_selected else None,
-                        data=opt,
-                    )
-                )
-            content = ft.Column(radio_items, spacing=4)
+            # 规范化选项（兼容旧字符串/新对象）
+            norm_opts = []
+            for o in opts:
+                if isinstance(o, dict):
+                    norm_opts.append({
+                        'label': str(o.get('label', o.get('text', ''))),
+                        'requires_open': bool(o.get('requires_open', False)),
+                        'open_hint': str(o.get('open_hint', '') or ''),
+                    })
+                else:
+                    norm_opts.append({'label': str(o), 'requires_open': False, 'open_hint': ''})
+
+            def _get_selection():
+                val = answers.get(key)
+                if isinstance(val, dict):
+                    return val.get('option'), val.get('open_text', '')
+                return val, ''
+
+            radio_column = ft.Column([], spacing=4)
+
+            def rebuild_single():
+                sel_label, sel_open_text = _get_selection()
+                radio_column.controls.clear()
+                for opt in norm_opts:
+                    label = opt['label']
+                    is_selected = label == sel_label
+                    children = [
+                        ft.Container(
+                            content=ft.Row([
+                                ft.Icon(
+                                    ft.Icons.RADIO_BUTTON_CHECKED if is_selected else ft.Icons.RADIO_BUTTON_UNCHECKED,
+                                    color='#1976D2' if is_selected else '#757575',
+                                    size=20,
+                                ),
+                                ft.Text(label, size=16, color='#212121',
+                                        overflow=ft.TextOverflow.VISIBLE, expand=True,
+                                        no_wrap=False),
+                            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                            on_click=None if readonly else (lambda e, o=opt: _on_single_select(o, key, answers, rebuild_single, radio_column)),
+                            padding=ft.Padding(8, 6, 8, 6),
+                            border_radius=8,
+                            bgcolor='#E3F2FD' if is_selected else None,
+                            data=label,
+                        )
+                    ]
+                    # 选中且要求补充说明时，显示开放式文本框
+                    if is_selected and opt['requires_open']:
+                        open_tf = ft.TextField(
+                            value=sel_open_text,
+                            multiline=True,
+                            min_lines=2,
+                            max_lines=4,
+                            hint_text=opt['open_hint'] or '请输入补充说明...',
+                            border_color='#BBDEFB',
+                            focused_border_color='#1976D2',
+                            text_size=15,
+                            on_change=lambda e, l=label: _on_open_text_change(l, e.control.value, key, answers),
+                        )
+                        if readonly:
+                            open_tf.read_only = True
+                        children.append(
+                            ft.Container(
+                                content=open_tf,
+                                padding=ft.Padding(28, 4, 8, 8),
+                            )
+                        )
+                    radio_column.controls.append(ft.Column(children, spacing=2))
+                # 页面控件加载完成前不调用方法（未挂载时不刷新）
+                if radio_column.parent is not None:
+                    radio_column.update()
+
+            rebuild_single()
+            content = radio_column
 
     elif qtype == 'multiple_choice':
         opts = question.get('options', [])
+        open_enabled = bool(question.get('open_text_enabled', False))
+        open_title = question.get('open_text_title', '') or ''
+        open_hint = question.get('open_text_hint', '') or ''
         if not opts:
             content = ft.Text('(无选项)', size=15, color='#9E9E9E', italic=True)
         else:
-            selected = current_val if isinstance(current_val, list) else []
+            # 兼容旧 list 答案与新 dict 答案 {'options': [...], 'open_text': '...'}
+            if isinstance(current_val, dict):
+                selected = current_val.get('options', []) if isinstance(current_val.get('options'), list) else []
+                selected_open_text = current_val.get('open_text', '') or ''
+            elif isinstance(current_val, list):
+                selected = current_val
+                selected_open_text = ''
+            else:
+                selected = []
+                selected_open_text = ''
             check_items = []
             for opt in opts:
-                is_checked = opt in selected
+                label = opt.get('label', '') if isinstance(opt, dict) else str(opt)
+                is_checked = label in selected
                 check_items.append(
                     ft.Container(
                         content=ft.Row([
@@ -537,19 +612,52 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                                 value=is_checked,
                                 fill_color='#1976D2',
                                 disabled=readonly,
-                                on_change=lambda e, o=opt: _on_check_toggle(o, key, answers),
+                                on_change=lambda e, l=label: _on_check_toggle(l, key, answers, open_enabled),
                             ),
-                            ft.Text(opt, size=16, color='#212121',
+                            ft.Text(label, size=16, color='#212121',
                                     overflow=ft.TextOverflow.VISIBLE, expand=True,
                                     no_wrap=False),
                         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
                         padding=ft.Padding(4, 6, 4, 6),
                         border_radius=8,
                         bgcolor='#E3F2FD' if is_checked else None,
-                        on_click=None if readonly else (lambda e, o=opt: _on_check_toggle(o, key, answers)),
+                        on_click=None if readonly else (lambda e, l=label: _on_check_toggle(l, key, answers, open_enabled)),
                     )
                 )
-            content = ft.Column(check_items, spacing=4)
+            multi_controls = [ft.Column(check_items, spacing=4)]
+            # 题目级开放式文本框（一道多选题仅一个）
+            if open_enabled:
+                open_tf = ft.TextField(
+                    value=selected_open_text,
+                    multiline=True,
+                    min_lines=2,
+                    max_lines=4,
+                    hint_text=open_hint or '请输入补充说明...',
+                    border_color='#BBDEFB',
+                    focused_border_color='#1976D2',
+                    text_size=15,
+                    on_change=lambda e: _on_multi_open_text_change(e.control.value, key, answers),
+                )
+                if readonly:
+                    open_tf.read_only = True
+                open_area = ft.Container(
+                    content=ft.Column([
+                        ft.Row([
+                            ft.Icon(ft.Icons.EDIT_NOTE, size=16, color='#1976D2'),
+                            ft.Text(open_title or '开放式文本框', size=15,
+                                    weight=ft.FontWeight.W_600, color='#1976D2'),
+                        ], spacing=4),
+                        open_tf,
+                    ], spacing=4),
+                    bgcolor='#F5F9FF',
+                    border_radius=8,
+                    border=ft.Border.all(width=1, color='#BBDEFB'),
+                    padding=ft.Padding(10, 8, 10, 8),
+                )
+                multi_controls.append(
+                    ft.Container(content=open_area, padding=ft.Padding(0, 10, 0, 0))
+                )
+            content = ft.Column(multi_controls, spacing=0)
 
     elif qtype == 'open':
         tf = ft.TextField(
@@ -600,10 +708,10 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                     content=ft.Column([
                         ft.Row([
                             ft.Icon(ft.Icons.LIGHTBULB_OUTLINE, size=16, color='#FF8F00'),
-                            ft.Text('作答提示', size=14, color='#FF8F00',
+                            ft.Text('作答提示', size=15, color='#FF8F00',
                                     weight=ft.FontWeight.W_600),
                         ], spacing=4),
-                        *[ft.Text(f'{i}. {line}', size=14, color='#FF8F00', italic=True,
+                        *[ft.Text(f'{i}. {line}', size=15, color='#FF8F00', italic=True,
                                   overflow=ft.TextOverflow.VISIBLE)
                           for i, line in enumerate(hint_lines, 1)],
                     ], spacing=2),
@@ -625,18 +733,59 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
     )
 
 
-def _on_choice_select(option: str, key: str, answers: dict):
-    """单选：选择某个选项"""
-    answers[key] = option
-
-
-def _on_check_toggle(option: str, key: str, answers: dict):
-    """多选：切换某个选项的选中状态"""
-    selected: list = answers.get(key)
-    if not isinstance(selected, list):
-        selected = []
-    if option in selected:
-        selected.remove(option)
+def _on_single_select(option: dict, key: str, answers: dict, rebuild, radio_column):
+    """单选：选择某个选项。若该选项配置了开放式文本框，答案保存为 dict。"""
+    label = option.get('label', '')
+    if option.get('requires_open'):
+        # 保留已填写的补充文本（切换选项时不丢失）
+        cur = answers.get(key)
+        cur_open = cur.get('open_text', '') if isinstance(cur, dict) else ''
+        answers[key] = {'option': label, 'open_text': cur_open}
     else:
-        selected.append(option)
-    answers[key] = selected
+        answers[key] = label
+    rebuild()
+
+
+def _on_open_text_change(option_label: str, value: str, key: str, answers: dict):
+    """单选：开放式文本框内容变更，保存为 dict 答案"""
+    answers[key] = {'option': option_label, 'open_text': value}
+
+
+def _on_check_toggle(option_label: str, key: str, answers: dict, open_enabled: bool = False):
+    """多选：切换某个选项的选中状态
+
+    若题目启用了开放式文本框，答案保存为 dict: {'options': [...], 'open_text': '...'}
+    """
+    cur = answers.get(key)
+    # 兼容 dict 答案
+    if isinstance(cur, dict):
+        selected = cur.get('options', []) if isinstance(cur.get('options'), list) else []
+        if option_label in selected:
+            selected.remove(option_label)
+        else:
+            selected.append(option_label)
+        answers[key] = {'options': selected, 'open_text': cur.get('open_text', '')}
+        return
+    # list / 首次作答
+    selected = cur if isinstance(cur, list) else []
+    if option_label in selected:
+        selected.remove(option_label)
+    else:
+        selected.append(option_label)
+    if open_enabled:
+        # 题目启用了开放式文本框，保存 dict 结构
+        answers[key] = {'options': selected, 'open_text': ''}
+    else:
+        answers[key] = selected
+
+
+def _on_multi_open_text_change(value: str, key: str, answers: dict):
+    """多选题开放式文本框内容变更"""
+    cur = answers.get(key)
+    if isinstance(cur, dict):
+        selected = cur.get('options', []) if isinstance(cur.get('options'), list) else []
+        answers[key] = {'options': selected, 'open_text': value}
+    else:
+        # 未选选项时也保留文本
+        selected = cur if isinstance(cur, list) else []
+        answers[key] = {'options': selected, 'open_text': value}

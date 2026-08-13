@@ -93,7 +93,10 @@ def _create_sqlite_tables(conn):
             question_type VARCHAR2(20) NOT NULL CHECK(question_type IN ('single_choice', 'multiple_choice', 'open')),
             options TEXT,
             hint VARCHAR2(500),
-            sort_order INTEGER DEFAULT 0
+            sort_order INTEGER DEFAULT 0,
+            open_text_enabled INTEGER DEFAULT 0,
+            open_text_title VARCHAR2(200),
+            open_text_hint VARCHAR2(500)
         );
 
         CREATE TABLE IF NOT EXISTS tasks (
@@ -195,6 +198,20 @@ def _create_sqlite_tables(conn):
         cursor.execute("ALTER TABLE case_questions ADD COLUMN hint VARCHAR2(500)")
         conn.commit()
         print('[DB] 已添加 case_questions.hint 字段')
+
+    # 增量迁移：为多选题补充开放式文本框配置字段（题目级，一道多选题仅一个）
+    if 'open_text_enabled' not in q_cols:
+        cursor.execute("ALTER TABLE case_questions ADD COLUMN open_text_enabled INTEGER DEFAULT 0")
+        conn.commit()
+        print('[DB] 已添加 case_questions.open_text_enabled 字段')
+    if 'open_text_title' not in q_cols:
+        cursor.execute("ALTER TABLE case_questions ADD COLUMN open_text_title VARCHAR2(200)")
+        conn.commit()
+        print('[DB] 已添加 case_questions.open_text_title 字段')
+    if 'open_text_hint' not in q_cols:
+        cursor.execute("ALTER TABLE case_questions ADD COLUMN open_text_hint VARCHAR2(500)")
+        conn.commit()
+        print('[DB] 已添加 case_questions.open_text_hint 字段')
 
     # 增量迁移：为反馈选项补充 comment_hint 字段
     cursor.execute("PRAGMA table_info(feedback_question_options)")

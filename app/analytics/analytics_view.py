@@ -183,7 +183,9 @@ def _build_case_submission_chart(per_case: list) -> ft.Container:
 def _generate_freq_chart(qa: dict) -> ft.Image:
     """生成频次统计图表"""
     freq = qa['frequency']
-    options = qa['options']
+    raw_options = qa['options']
+    # 兼容对象选项 / 旧字符串选项
+    options = [o.get('label', '') if isinstance(o, dict) else str(o) for o in raw_options]
     is_multi = qa['question_type'] == 'multiple_choice'
 
     fig, ax = plt.subplots(figsize=(5, max(2.5, len(options) * 0.5)))

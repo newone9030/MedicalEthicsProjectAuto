@@ -88,19 +88,25 @@ END;
 -- 3. 案例题目表
 -- ============================================
 CREATE TABLE case_questions (
-    id              NUMBER PRIMARY KEY,
-    case_id         NUMBER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-    question_text   VARCHAR2(500) NOT NULL,
-    question_type   VARCHAR2(20) NOT NULL CHECK (question_type IN ('single_choice', 'multiple_choice', 'open')),
-    options         CLOB,
-    hint            VARCHAR2(500),
-    sort_order      NUMBER DEFAULT 0
+    id                  NUMBER PRIMARY KEY,
+    case_id             NUMBER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    question_text       VARCHAR2(500) NOT NULL,
+    question_type       VARCHAR2(20) NOT NULL CHECK (question_type IN ('single_choice', 'multiple_choice', 'open')),
+    options             CLOB,
+    hint                VARCHAR2(500),
+    sort_order          NUMBER DEFAULT 0,
+    open_text_enabled   NUMBER(1) DEFAULT 0,
+    open_text_title     VARCHAR2(200),
+    open_text_hint      VARCHAR2(500)
 );
 
 COMMENT ON TABLE case_questions IS '案例题目表';
 COMMENT ON COLUMN case_questions.question_type IS '题型: single_choice-单选, multiple_choice-多选, open-开放式文本题';
 COMMENT ON COLUMN case_questions.options IS '选项JSON, 格式: ["选项A","选项B","选项C"]';
 COMMENT ON COLUMN case_questions.hint IS '作答提示，管理员维护，可为空';
+COMMENT ON COLUMN case_questions.open_text_enabled IS '多选题是否启用开放式文本框: 0-否, 1-是（仅多选题有效，一道多选题仅一个）';
+COMMENT ON COLUMN case_questions.open_text_title IS '多选题开放式文本框的标题栏';
+COMMENT ON COLUMN case_questions.open_text_hint IS '多选题开放式文本框的录入提示';
 
 CREATE SEQUENCE seq_case_questions START WITH 1 INCREMENT BY 1 NOCACHE;
 

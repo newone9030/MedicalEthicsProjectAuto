@@ -18,6 +18,8 @@ from app.student.student_dashboard_view import build_student_dashboard
 from app.student.survey_taker_view import build_survey_taker_view
 from app.analytics.analytics_view import build_analytics_view
 from app.analytics.export import build_export_buttons
+from app.analytics.data_export_view import build_data_export_view
+from app.analytics.data_import_view import build_data_import_view
 from app.response.response_service import get_response_count
 from app.analytics.analytics_service import get_student_count
 from app.auth.account_manager_view import build_account_manager_view
@@ -119,6 +121,12 @@ def _build_view(route: str, page: ft.Page, **kwargs):
         task_id = kwargs.get('task_id')
         return _build_feedback_task_editor(page, page_category, task_id)
 
+    elif route == '/admin/data-export':
+        return _build_admin_data_export(page)
+
+    elif route == '/admin/data-import':
+        return _build_admin_data_import(page)
+
     # 学生视图
     elif route == '/student/consent':
         return _build_consent_page(page)
@@ -205,6 +213,10 @@ def _build_admin_dashboard(page: ft.Page) -> ft.View:
                      lambda e: navigate('admin/accounts')),
         _entry_card('反馈任务维护', '创建和维护预测试反馈任务，管理题目和选项', ft.Icons.FEEDBACK,
                      lambda e: navigate('admin/feedback/tasks')),
+        _entry_card('数据导出', '导出基础数据和学生数据为 Excel 文件', ft.Icons.FILE_DOWNLOAD,
+                     lambda e: navigate('admin/data-export')),
+        _entry_card('数据导入', '从导出的 Excel 中选择工作表恢复数据', ft.Icons.IMPORT_EXPORT,
+                     lambda e: navigate('admin/data-import')),
     ], spacing=16, wrap=True)
 
     return ft.View(
@@ -402,6 +414,48 @@ def _build_admin_analytics(page: ft.Page) -> ft.View:
         controls=[
             ft.Container(
                 content=ft.Column(build_analytics_view(page, on_back=go_back)),
+                padding=24,
+                expand=True,
+            ),
+        ],
+        bgcolor='#F5F7FA',
+    )
+
+
+# ============================================
+# 数据导出页
+# ============================================
+def _build_admin_data_export(page: ft.Page) -> ft.View:
+    def go_back():
+        _navigate(page, 'dashboard')
+
+    return ft.View(
+        route='/admin/data-export',
+        scroll=ft.ScrollMode.AUTO,
+        controls=[
+            ft.Container(
+                content=ft.Column(build_data_export_view(page, on_back=go_back)),
+                padding=24,
+                expand=True,
+            ),
+        ],
+        bgcolor='#F5F7FA',
+    )
+
+
+# ============================================
+# 数据导入页
+# ============================================
+def _build_admin_data_import(page: ft.Page) -> ft.View:
+    def go_back():
+        _navigate(page, 'dashboard')
+
+    return ft.View(
+        route='/admin/data-import',
+        scroll=ft.ScrollMode.AUTO,
+        controls=[
+            ft.Container(
+                content=ft.Column(build_data_import_view(page, on_back=go_back)),
                 padding=24,
                 expand=True,
             ),
@@ -952,6 +1006,6 @@ mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 DB_PATH = os.path.join(mount_path, "survey.db")
 
 if __name__ == '__main__':
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
-         , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
-    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
+        ## , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER)

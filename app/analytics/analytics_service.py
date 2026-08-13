@@ -4,6 +4,7 @@
 
 import json
 from app.db import get_connection
+from app.case.question_service import normalize_options
 
 
 def get_task_statistics(task_id: int) -> dict:
@@ -78,7 +79,9 @@ def get_question_analysis(task_id: int) -> list:
             q_id = q_row[0]
             q_type = q_row[3]
             options_str = q_row[4]
-            options = json.loads(options_str) if options_str else []
+            raw_options = json.loads(options_str) if options_str else []
+            options = normalize_options(raw_options)
+            option_labels = [o['label'] for o in options]
 
             analysis = {
                 'question_id': q_id,
@@ -101,21 +104,46 @@ def get_question_analysis(task_id: int) -> list:
             if q_type in ('single_choice', 'multiple_choice'):
                 # 频次统计
                 freq = {}
-                for opt in options:
-                    freq[opt] = 0
+                for label in option_labels:
+                    freq[label] = 0
 
                 for ans_row in answers:
                     ans = ans_row[0]
                     if q_type == 'single_choice':
+                        # 兼容旧字符串答案 / 新 dict 答案
+                        if isinstance(ans, str):
+                            try:
+                                parsed = json.loads(ans)
+                            except (json.JSONDecodeError, TypeError):
+                                parsed = ans
+                            if isinstance(parsed, dict):
+                                ans = parsed.get('option')
+                            else:
+                                ans = parsed
+                        elif isinstance(ans, dict):
+                            ans = ans.get('option')
                         if ans in freq:
                             freq[ans] += 1
                     else:  # multiple_choice
-                        try:
-                            selected = json.loads(ans) if ans else []
-                            for s in selected:
-                                freq[s] = freq.get(s, 0) + 1
-                        except (json.JSONDecodeError, TypeError):
-                            pass
+                        # 兼容旧 list 答案 / 新 dict 答案 {'options': [...], 'open_text': '...'}
+                        if isinstance(ans, str):
+                            try:
+                                selected = json.loads(ans) if ans else []
+                            except (json.JSONDecodeError, TypeError):
+                                selected = []
+                        elif isinstance(ans, dict):
+                            selected = ans.get('options', []) if isinstance(ans.get('options'), list) else []
+                        elif isinstance(ans, list):
+                            selected = ans
+                        else:
+                            selected = []
+                        if isinstance(selected, dict):
+                            selected = selected.get('options', []) if isinstance(selected.get('options'), list) else []
+                        if not isinstance(selected, list):
+                            selected = []
+                        for s in selected:
+                            if s in freq:
+                                freq[s] += 1
 
                 analysis['frequency'] = freq
                 analysis['total_responses'] = total_responses

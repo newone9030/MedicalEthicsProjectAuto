@@ -1,0 +1,6 @@
+﻿cases cols: ['id', 'title', 'body', 'theme', 'created_by', 'created_at', 'updated_at']
+rows: [(30, '�����ı�����֤����')]
+q count: 1
+resp count: 0
+task_cases count: 0
+after cleanup cases: 0

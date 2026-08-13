@@ -249,10 +249,10 @@ def list_tasks(status_filter: str = '', search: str = '', task_type: str = '') -
         return tasks
 
 
-def get_active_task_for_student(student_id: int) -> dict:
+def get_active_tasks_for_student(student_id: int) -> list:
     """
-    获取学生当前进行中任务（全局唯一）
-    返回最先开始的那个进行中任务
+    获取学生当前所有进行中任务（按开始时间升序）
+    返回 status='active' 且未到截止时间的全部任务，排除背景资料问卷
     """
     auto_update_task_statuses()
     now = datetime.now()
@@ -270,35 +270,48 @@ def get_active_task_for_student(student_id: int) -> dict:
             ORDER BY t.start_time ASC
         """, {'now': now})
 
-        row = cursor.fetchone()
-        if not row:
-            return None
+        rows = cursor.fetchall()
+        if not rows:
+            return []
 
-        task = {
-            'id': row[0], 'name': row[1], 'description': row[2],
-            'start_time': row[3], 'end_time': row[4], 'status': row[5],
-            'case_count': row[6], 'cases': []
-        }
+        tasks = []
+        for row in rows:
+            task = {
+                'id': row[0], 'name': row[1], 'description': row[2],
+                'start_time': row[3], 'end_time': row[4], 'status': row[5],
+                'case_count': row[6], 'cases': []
+            }
 
-        # 获取关联案例及作答进度
-        cursor.execute("""
-            SELECT c.id, c.title, c.theme, tc.sort_order,
-                   COALESCE((SELECT r.status FROM responses r
-                        WHERE r.task_id = :tid AND r.case_id = c.id AND r.student_id = :sid),
-                       'not_started') as response_status
-            FROM task_cases tc
-            JOIN cases c ON tc.case_id = c.id
-            WHERE tc.task_id = :tid
-            ORDER BY tc.sort_order
-        """, {'tid': task['id'], 'sid': student_id})
+            # 获取关联案例及作答进度
+            cursor.execute("""
+                SELECT c.id, c.title, c.theme, tc.sort_order,
+                       COALESCE((SELECT r.status FROM responses r
+                            WHERE r.task_id = :tid AND r.case_id = c.id AND r.student_id = :sid),
+                           'not_started') as response_status
+                FROM task_cases tc
+                JOIN cases c ON tc.case_id = c.id
+                WHERE tc.task_id = :tid
+                ORDER BY tc.sort_order
+            """, {'tid': task['id'], 'sid': student_id})
 
-        for cr in cursor.fetchall():
-            task['cases'].append({
-                'id': cr[0], 'title': cr[1], 'theme': cr[2],
-                'sort_order': cr[3], 'response_status': cr[4]
-            })
+            for cr in cursor.fetchall():
+                task['cases'].append({
+                    'id': cr[0], 'title': cr[1], 'theme': cr[2],
+                    'sort_order': cr[3], 'response_status': cr[4]
+                })
 
-        return task
+            tasks.append(task)
+
+        return tasks
+
+
+def get_active_task_for_student(student_id: int) -> dict:
+    """
+    获取学生当前进行中任务（兼容旧调用）
+    返回最先开始的进行中任务；无进行中任务时返回 None
+    """
+    tasks = get_active_tasks_for_student(student_id)
+    return tasks[0] if tasks else None
 
 
 def get_task_count() -> int:
