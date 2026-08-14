@@ -21,6 +21,15 @@ from app.response.response_service import (
 from app.case.question_service import get_questions_by_case
 
 
+def _is_exclusive_option(a: str, b: str, excl_meta: dict) -> bool:
+    """判断两个多选选项是否互斥（不能同时选择）"""
+    ma = excl_meta.get(a)
+    mb = excl_meta.get(b)
+    if not ma or not mb:
+        return False
+    return ma['index'] in mb['exclusive_with'] or mb['index'] in ma['exclusive_with']
+
+
 def build_background_survey_view(
     page: ft.Page,
     on_navigate_dashboard: Callable,
@@ -70,20 +79,45 @@ def build_background_survey_view(
 
             if qtype == 'single_choice':
                 radio_items = []
+                single_open_options = {}  # {label: open_hint}，需要补充说明的选项
                 for opt in options:
                     # 兼容旧字符串选项/新对象选项
                     label = opt.get('label', '') if isinstance(opt, dict) else str(opt)
+                    if isinstance(opt, dict) and bool(opt.get('requires_open', False)):
+                        single_open_options[label] = str(opt.get('open_hint', '') or '')
                     radio = ft.Radio(value=label, label=label, fill_color='#1976D2')
                     radio_items.append(radio)
 
                 draft_answer = draft_info.get('answer', '')
+                draft_open_text = ''
+                if isinstance(draft_answer, str):
+                    # 保存时 dict 答案被外层 json.dumps 序列化成了字符串
+                    try:
+                        parsed = json.loads(draft_answer)
+                        if isinstance(parsed, dict):
+                            draft_answer = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 if isinstance(draft_answer, dict):
                     # 任务作答端可能保存了 dict 答案
+                    draft_open_text = draft_answer.get('open_text', '') or ''
                     draft_answer = draft_answer.get('option', '')
                 rg = ft.RadioGroup(
                     value=draft_answer or '',
                     content=ft.Column(radio_items, spacing=4),
                 )
+
+                # 选项级开放式文本框（仅当存在需补充说明的选项时创建）
+                single_open_ctrl = None
+                if single_open_options:
+                    single_open_ctrl = ft.TextField(
+                        value=draft_open_text,
+                        multiline=True, min_lines=2, max_lines=4,
+                        hint_text=single_open_options.get(draft_answer or '', '') or '请输入补充说明...',
+                        border_radius=8, text_size=15,
+                        border_color='#BBDEFB',
+                        visible=draft_answer in single_open_options,
+                    )
 
                 answer_ctrl = rg
                 answer_items_list = radio_items
@@ -107,9 +141,21 @@ def build_background_survey_view(
 
                 checkboxes = {}
                 check_items = []
-                for opt in options:
+                excl_meta = {}
+                for i, opt in enumerate(options):
                     # 兼容旧字符串选项/新对象选项
                     label = opt.get('label', '') if isinstance(opt, dict) else str(opt)
+                    # 记录互斥配置：{label: {'index': i, 'exclusive_with': set(idx)}}
+                    ex = set()
+                    if isinstance(opt, dict):
+                        for x in (opt.get('exclusive_with') or []):
+                            if isinstance(x, bool):
+                                continue
+                            if isinstance(x, int) and x >= 0:
+                                ex.add(x)
+                            elif isinstance(x, str) and x.isdigit():
+                                ex.add(int(x))
+                    excl_meta[label] = {'index': i, 'exclusive_with': ex}
                     cb = ft.Checkbox(value=label in draft_answer, fill_color='#1976D2')
                     checkboxes[label] = cb
                     bg_container = ft.Container(
@@ -167,9 +213,14 @@ def build_background_survey_view(
                 'answer_items_list': answer_items_list if qtype in ('single_choice', 'multiple_choice') else [],
                 'multi_open_ctrl': multi_open_ctrl if qtype == 'multiple_choice' else None,
                 'multi_open_title': multi_open_title if qtype == 'multiple_choice' else '',
+                'single_open_ctrl': single_open_ctrl if qtype == 'single_choice' else None,
+                'single_open_options': single_open_options if qtype == 'single_choice' else {},
+                'section_title': (q.get('section_title') or '').strip(),
+                'is_required': bool(q.get('is_required', True)),
             }
             if qtype == 'multiple_choice':
                 entry['checkboxes_map'] = checkboxes_map
+                entry['excl_meta'] = excl_meta
             case_question_data.append(entry)
         question_fields[case['id']] = case_question_data
 
@@ -190,7 +241,15 @@ def build_background_survey_view(
         """获取题目答案值（字符串）"""
         qtype = qd.get('question_type', 'open')
         if qtype == 'single_choice':
-            return (qd['answer_ctrl'].value or '')
+            sel = qd['answer_ctrl'].value or ''
+            if not sel:
+                return ''
+            single_open_ctrl = qd.get('single_open_ctrl')
+            if single_open_ctrl is not None and sel in qd.get('single_open_options', {}):
+                # 选中需补充说明的选项：答案保存为 dict {'option':..., 'open_text':...}
+                open_text = (single_open_ctrl.value or '').strip()
+                return json.dumps({'option': sel, 'open_text': open_text}, ensure_ascii=False)
+            return sel
         elif qtype == 'multiple_choice':
             cbs = qd.get('choice_controls', {})
             selected = [label for label, cb in cbs.items() if cb.value]
@@ -209,7 +268,14 @@ def build_background_survey_view(
         """判断题目是否已作答"""
         qtype = qd.get('question_type', 'open')
         if qtype == 'single_choice':
-            return bool(qd['answer_ctrl'].value)
+            sel = qd['answer_ctrl'].value or ''
+            if not sel:
+                return False
+            single_open_ctrl = qd.get('single_open_ctrl')
+            if single_open_ctrl is not None and sel in qd.get('single_open_options', {}):
+                # 选中需补充说明的选项时，必须填写补充内容才算作答
+                return bool((single_open_ctrl.value or '').strip())
+            return True
         elif qtype == 'multiple_choice':
             cbs = qd.get('choice_controls', {})
             if any(cb.value for cb in cbs.values()):
@@ -248,6 +314,23 @@ def build_background_survey_view(
         case_questions = question_fields.get(case['id'], [])
         question_rows = []
         for idx, qd in enumerate(case_questions):
+            # 部分标题（分组标题）：本题开启新部分（与前题不同）时，在题目上方显示标题栏
+            section_title = qd.get('section_title', '')
+            if section_title and (idx == 0 or section_title != case_questions[idx - 1].get('section_title', '')):
+                question_rows.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Container(width=4, height=20, bgcolor='#1976D2', border_radius=2),
+                            ft.Text(section_title, size=17, weight=ft.FontWeight.BOLD, color='#1565C0',
+                                    overflow=ft.TextOverflow.VISIBLE),
+                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        bgcolor='#E3F2FD',
+                        border_radius=8,
+                        padding=ft.Padding(12, 8, 12, 8),
+                        margin=ft.Margin(0, 0, 0, 6),
+                    )
+                )
+
             q_num = idx + 1
             qtype = qd.get('question_type', 'open')
 
@@ -282,6 +365,25 @@ def build_background_survey_view(
                 # 单选直接放 RadioGroup
                 if qd['answer_ctrl']:
                     answer_area.append(qd['answer_ctrl'])
+                # 选项级开放式文本框（选中需补充说明的选项时显示）
+                single_open_ctrl = qd.get('single_open_ctrl')
+                if single_open_ctrl is not None:
+                    answer_area.append(
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Icon(ft.Icons.EDIT_NOTE, size=16, color='#1976D2'),
+                                    ft.Text('补充说明', size=15,
+                                            weight=ft.FontWeight.W_600, color='#1976D2'),
+                                ], spacing=4),
+                                single_open_ctrl,
+                            ], spacing=4),
+                            bgcolor='#F5F9FF',
+                            border_radius=8,
+                            border=ft.Border.all(width=1, color='#BBDEFB'),
+                            padding=ft.Padding(10, 8, 10, 8),
+                        )
+                    )
             elif qtype == 'multiple_choice':
                 # 多选放 Checkbox 列表
                 items_list = qd.get('answer_items_list', [])
@@ -309,29 +411,43 @@ def build_background_survey_view(
                         )
                     )
 
+            is_required = qd.get('is_required', True)
+            header_row_controls = [
+                ft.Container(
+                    content=ft.Text(str(q_num), size=14, weight=ft.FontWeight.BOLD,
+                                    color='white', text_align=ft.TextAlign.CENTER),
+                    bgcolor='#1976D2', border_radius=12,
+                    width=24, height=24,
+                    alignment=ft.Alignment(0, 0),
+                ),
+                ft.Container(
+                    content=ft.Text(
+                        type_badge_labels.get(qtype, qtype),
+                        size=12, color='white',
+                    ),
+                    bgcolor='#1976D2', border_radius=8,
+                    padding=ft.Padding(6, 2, 6, 2),
+                ),
+            ]
+            if is_required:
+                header_row_controls.append(
+                    ft.Container(
+                        content=ft.Text('必答', size=12, color='#FF5252'),
+                        border=ft.Border.all(width=1, color='#FF5252'),
+                        border_radius=6,
+                        padding=ft.Padding(6, 1, 6, 1),
+                    )
+                )
+            header_row_controls.append(
+                ft.Text(qd['question_text'], size=15, weight=ft.FontWeight.W_500,
+                        expand=True, overflow=ft.TextOverflow.VISIBLE),
+            )
+            header_row_controls.append(qd['score_ctrl'])
             question_rows.append(
                 ft.Container(
                     content=ft.Column([
-                        ft.Row([
-                            ft.Container(
-                                content=ft.Text(str(q_num), size=14, weight=ft.FontWeight.BOLD,
-                                                color='white', text_align=ft.TextAlign.CENTER),
-                                bgcolor='#1976D2', border_radius=12,
-                                width=24, height=24,
-                                alignment=ft.Alignment(0, 0),
-                            ),
-                            ft.Container(
-                                content=ft.Text(
-                                    type_badge_labels.get(qtype, qtype),
-                                    size=12, color='white',
-                                ),
-                                bgcolor='#1976D2', border_radius=8,
-                                padding=ft.Padding(6, 2, 6, 2),
-                            ),
-                            ft.Text(qd['question_text'], size=15, weight=ft.FontWeight.W_500,
-                                    expand=True, overflow=ft.TextOverflow.VISIBLE),
-                            qd['score_ctrl'],
-                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        ft.Row(header_row_controls, spacing=8,
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         *hint_controls,
                         *answer_area,
                     ], spacing=8),
@@ -371,19 +487,55 @@ def build_background_survey_view(
                     return handler
                 qd['answer_ctrl'].on_change = make_change_handler()
             elif qtype == 'single_choice' and qd['answer_ctrl']:
-                def make_radio_change_handler():
+                single_open_ctrl = qd.get('single_open_ctrl')
+                single_open_options = qd.get('single_open_options', {})
+                def make_radio_change_handler(open_ctrl=single_open_ctrl, open_opts=single_open_options):
                     def handler(e):
+                        sel = e.control.value or ''
+                        if open_ctrl is not None:
+                            if sel in open_opts:
+                                open_ctrl.hint_text = open_opts[sel] or '请输入补充说明...'
+                                open_ctrl.visible = True
+                            else:
+                                open_ctrl.visible = False
+                            try:
+                                open_ctrl.update()
+                            except Exception:
+                                pass
                         _update_progress()
                     return handler
                 qd['answer_ctrl'].on_change = make_radio_change_handler()
             elif qtype == 'multiple_choice':
                 cbs = qd.get('choice_controls', {})
+                excl_meta = qd.get('excl_meta', {})
                 for opt, cb in cbs.items():
-                    def make_check_change_handler():
+                    def make_check_change_handler(o=opt, c=cb):
                         def handler(e):
+                            if c.value:
+                                # 互斥校验：与其他已勾选选项冲突则阻止并提示
+                                conflict = None
+                                for other, other_cb in cbs.items():
+                                    if other == o or not other_cb.value:
+                                        continue
+                                    if _is_exclusive_option(o, other, excl_meta):
+                                        conflict = other
+                                        break
+                                if conflict:
+                                    c.value = False
+                                    try:
+                                        c.update()
+                                    except Exception:
+                                        pass
+                                    snack.content.value = f'选项「{o}」与「{conflict}」不能同时选择'
+                                    snack.bgcolor = '#FF5252'
+                                    snack.open = True
+                                    if snack not in page.overlay:
+                                        page.overlay.append(snack)
+                                    page.update()
+                                    return
                             _update_progress()
                         return handler
-                    cb.on_change = make_check_change_handler()
+                    cb.on_change = make_check_change_handler(opt, cb)
 
     # ================================================================
     # 第六步：构建底部按钮
@@ -408,17 +560,17 @@ def build_background_survey_view(
         page.update()
 
     def _do_submit(e):
-        """提交：验证所有题目都已作答，年龄段验证"""
-        # 1. 验证所有题目都已作答
+        """提交：验证必答题都已作答，年龄段验证"""
+        # 1. 验证必答题都已作答
         unanswered = []
         for cid, qds in question_fields.items():
             for qd in qds:
-                if not _is_answered(qd):
+                if qd.get('is_required', True) and not _is_answered(qd):
                     case_title = next((c['title'] for c in cases if c['id'] == cid), f'案例{cid}')
                     unanswered.append(f'「{case_title}」中的「{qd["question_text"][:20]}...」')
 
         if unanswered:
-            snack.content.value = f'还有 {len(unanswered)} 道题目未作答，请完成后提交'
+            snack.content.value = f'还有 {len(unanswered)} 道必答题未作答，请完成后提交'
             snack.bgcolor = None
             snack.open = True
             if snack not in page.overlay:

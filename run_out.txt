@@ -1,0 +1,5 @@
+[DB] SQLite 数据库已连接 (C:\PythonProject\survey.db)
+[DB] SQLite连接成功
+[ROUTE] route_change fired, route=/login
+[ROUTE] built view type=View, controls count=1
+[ROUTE] page updated, views count=1

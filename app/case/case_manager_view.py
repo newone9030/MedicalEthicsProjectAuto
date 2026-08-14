@@ -227,7 +227,9 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
             result = add_question(case_id, '', 'single_choice', options=['选项A'], sort_order=len(questions))
             if result['success']:
                 new_q = {'id': result['question_id'], 'case_id': case_id, 'question_text': '', 
-                         'question_type': 'single_choice', 'options': ['选项A'], 'sort_order': len(questions), 'is_new': False, 'hint': ''}
+                         'question_type': 'single_choice', 'options': ['选项A'], 'sort_order': len(questions), 'is_new': False, 'hint': '',
+                         'open_text_enabled': False, 'open_text_title': '', 'open_text_hint': '', 'section_title': '',
+                         'is_required': True}
                 questions.append(new_q)
                 question_container.controls.append(_build_question_card(new_q, len(questions) - 1, refresh_questions, questions, refresh_single_question))
                 if question_container.page:
@@ -246,35 +248,42 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                 'open_text_enabled': False,
                 'open_text_title': '',
                 'open_text_hint': '',
+                'section_title': '',
+                'is_required': True,
             }
             questions.append(new_q)
             question_container.controls.append(_build_question_card(new_q, len(questions) - 1, refresh_questions, questions, refresh_single_question))
             if question_container.page:
                 question_container.update()
 
-    def _read_question_from_ui(card) -> dict:
+    def _read_question_from_ui(card, qid=None, temp_questions=None) -> dict:
         """从题目的 UI 卡片控件中读取实际值
         
-        UI 结构: Container.content = Column(controls=[Row(badge), Row(title+type), Divider, options_col, Divider, hint_field])
+        UI 结构: Container.content = Column(controls=[section_field, Row(badge), Row(title+type), Divider, options_col, Divider, hint_field])
+        qid/temp_questions 用于从内存题目中还原多选题选项的互斥配置（exclusive_with）。
         """
         card_col = card.content
-        if not isinstance(card_col, ft.Column) or len(card_col.controls) < 2:
+        if not isinstance(card_col, ft.Column) or len(card_col.controls) < 3:
             return None
-        # controls[1] = Row([question_text_field, type_dropdown])
-        title_row = card_col.controls[1]
+        # controls[2] = Row([question_text_field, type_dropdown, required_switch])
+        title_row = card_col.controls[2]
         if not isinstance(title_row, ft.Row) or len(title_row.controls) < 2:
             return None
         q_title_field = title_row.controls[0]
         q_type_dropdown = title_row.controls[1]
         title_val = (q_title_field.value or '').strip() if isinstance(q_title_field, ft.TextField) else ''
         type_val = q_type_dropdown.value if isinstance(q_type_dropdown, ft.Dropdown) else 'single_choice'
-        # controls[3] = options_column
+        # 必答开关（controls[2] 中的第三个控件）
+        required_val = True
+        if len(title_row.controls) > 2 and isinstance(title_row.controls[2], ft.Switch):
+            required_val = bool(title_row.controls[2].value)
+        # controls[4] = options_column
         opts = []
         open_text_enabled = False
         open_text_title = ''
         open_text_hint = ''
-        if type_val != 'open' and len(card_col.controls) > 3:
-            options_col = card_col.controls[3]
+        if type_val != 'open' and len(card_col.controls) > 4:
+            options_col = card_col.controls[4]
             if isinstance(options_col, ft.Column):
                 for opt_ctrl in options_col.controls:
                     if isinstance(opt_ctrl, ft.Column) and opt_ctrl.controls:
@@ -290,12 +299,29 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                                     'label': label,
                                     'requires_open': bool(open_check.value) if open_check else False,
                                     'open_hint': (hint_field.value or '').strip() if hint_field else '',
+                                    'exclusive_with': [],
                                 })
                     elif isinstance(opt_ctrl, ft.Row) and opt_ctrl.controls:
-                        # 多选题选项行：Row([label, delete])
+                        # 多选题选项行：Row([label, 互斥按钮, delete])
                         opt_field = opt_ctrl.controls[0]
                         if isinstance(opt_field, ft.TextField):
-                            opts.append((opt_field.value or '').strip())
+                            label = (opt_field.value or '').strip()
+                            ex = []
+                            if temp_questions:
+                                for tq in temp_questions:
+                                    if tq.get('id') == qid:
+                                        src = tq.get('options', [])
+                                        if isinstance(src, list) and len(src) > len(opts):
+                                            src_opt = src[len(opts)]
+                                            if isinstance(src_opt, dict):
+                                                ex = _clean_exclusive(src_opt.get('exclusive_with'))
+                                        break
+                            opts.append({
+                                'label': label,
+                                'requires_open': False,
+                                'open_hint': '',
+                                'exclusive_with': ex,
+                            })
                     elif isinstance(opt_ctrl, ft.Container):
                         # 多选题开放式文本框配置区
                         inner = opt_ctrl.content if isinstance(opt_ctrl.content, ft.Column) else None
@@ -313,6 +339,12 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
             if isinstance(ctrl, ft.TextField) and hasattr(ctrl, 'key') and ctrl.key == 'hint_field':
                 hint_val = (ctrl.value or '').strip()
                 break
+        # Find section field (key='section_field') - 分组标题
+        section_val = ''
+        for ctrl in card_col.controls:
+            if isinstance(ctrl, ft.TextField) and hasattr(ctrl, 'key') and ctrl.key == 'section_field':
+                section_val = (ctrl.value or '').strip()
+                break
         return {
             'title': title_val,
             'type': type_val,
@@ -321,6 +353,8 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
             'open_text_enabled': open_text_enabled,
             'open_text_title': open_text_title,
             'open_text_hint': open_text_hint,
+            'section_title': section_val,
+            'is_required': required_val,
         }
 
     def _show_sn(msg: str, success: bool = True):
@@ -338,7 +372,7 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
 
         # 校验题目标题不能为空 - 直接从 UI 控件中读取实际值
         for card in question_container.controls:
-            q_data = _read_question_from_ui(card)
+            q_data = _read_question_from_ui(card, getattr(card, 'data', None), questions)
             if q_data and not q_data['title']:
                 _show_sn('请完善所有题目的标题', False)
                 return
@@ -352,7 +386,7 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         q = questions[idx] if idx < len(questions) else None
                         if q is None:
                             continue
-                        q_data = _read_question_from_ui(card)
+                        q_data = _read_question_from_ui(card, q['id'], questions)
                         if not q_data:
                             continue
                         # 从 UI 重新获取题目标题和选项
@@ -363,6 +397,7 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                         open_enabled = bool(q_data.get('open_text_enabled', False))
                         open_title = q_data.get('open_text_title', '') or None
                         open_hint = q_data.get('open_text_hint', '') or None
+                        section_title = q_data.get('section_title', '')
 
                         if q.get('is_new', False):
                             # 新增的题目：先插入数据库
@@ -370,7 +405,9 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                                                       options=new_options, sort_order=idx, hint=new_hint,
                                                       open_text_enabled=open_enabled,
                                                       open_text_title=open_title,
-                                                      open_text_hint=open_hint)
+                                                      open_text_hint=open_hint,
+                                                      section_title=section_title or None,
+                                                      is_required=bool(q_data.get('is_required', True)))
                             if add_result['success']:
                                 q['id'] = add_result['question_id']
                                 q['is_new'] = False
@@ -379,7 +416,9 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                             update_question(q['id'], new_title, new_type, options=new_options, hint=new_hint,
                                             open_text_enabled=open_enabled,
                                             open_text_title=open_title,
-                                            open_text_hint=open_hint)
+                                            open_text_hint=open_hint,
+                                            section_title=section_title,
+                                            is_required=bool(q_data.get('is_required', True)))
             else:
                 user = page.session.store.get('user')
                 result = create_case(title, '', '', user['id'])
@@ -388,14 +427,16 @@ def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> 
                 # 创建新案例后处理题目 - 从 UI 控件读取
                 if result['success'] and new_case_id:
                     for idx, card in enumerate(question_container.controls):
-                        q_data = _read_question_from_ui(card)
+                        q_data = _read_question_from_ui(card, getattr(card, 'data', None), questions)
                         if q_data and q_data['title']:
                             add_question(new_case_id, q_data['title'], q_data['type'], 
                                         options=q_data['options'] if q_data['options'] else [],
                                         sort_order=idx, hint=q_data.get('hint', '') or None,
                                         open_text_enabled=bool(q_data.get('open_text_enabled', False)),
                                         open_text_title=q_data.get('open_text_title', '') or None,
-                                        open_text_hint=q_data.get('open_text_hint', '') or None)
+                                        open_text_hint=q_data.get('open_text_hint', '') or None,
+                                        section_title=q_data.get('section_title', '') or None,
+                                        is_required=bool(q_data.get('is_required', True)))
 
             if result['success']:
                 # 将成功消息存入 session，由列表页读取并显示
@@ -517,6 +558,15 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
         on_select=lambda e, q=qid, idx=index: _on_question_type_change(q, e.control.value, idx, temp_questions, on_single_refresh),
     )
 
+    # 是否必答开关
+    required_switch = ft.Switch(
+        value=bool(question.get('is_required', True)),
+        label='必答',
+        active_color='#FF5252',
+        inactive_thumb_color='#BDBDBD',
+        on_change=lambda e, q=qid: _on_required_change(q, bool(e.control.value), temp_questions),
+    )
+
     # 选项编辑器（仅单选和多选显示）
     options_column = ft.Column(spacing=4)
     is_single = question['question_type'] == 'single_choice'
@@ -576,7 +626,14 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
                         hint_input,
                     ], spacing=2)
                 else:
-                    # 多选题：仅选项文本 + 删除
+                    # 多选题：选项文本 + 互斥设置 + 删除
+                    excl_cur = _clean_exclusive(opt.get('exclusive_with')) if isinstance(opt, dict) else []
+                    excl_btn = ft.TextButton(
+                        content=ft.Text(f'互斥 ({len(excl_cur)})', size=13),
+                        icon=ft.Icons.LINK_OFF,
+                        style=ft.ButtonStyle(color='#1976D2'),
+                        on_click=lambda e, idx=i, q=qid: _on_exclusive_click(e, q, idx, temp_questions, on_refresh),
+                    )
                     opt_field = ft.Row([
                         ft.TextField(
                             value=label,
@@ -585,6 +642,7 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
                             expand=True,
                             on_change=lambda e, idx=i, q=qid: _on_option_change(q, idx, e.control.value, temp_questions),
                         ),
+                        excl_btn,
                         ft.IconButton(
                             icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
                             icon_color='#FF5252',
@@ -669,6 +727,18 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
         key='hint_field',
     )
 
+    # 分组标题（部分标题）：本题开启一个新部分，标题跟随其后题目直到下一个标题
+    section_field = ft.TextField(
+        value=question.get('section_title', ''),
+        label='部分标题（选填）',
+        hint_text='填写后，本题及之后题目（直到下一个填写标题的题目）归入该部分',
+        border_color='#90CAF9',
+        focused_border_color='#1976D2',
+        text_style=ft.TextStyle(size=12),
+        key='section_field',
+        on_change=lambda e, q=qid: _on_section_title_change(q, e.control.value, temp_questions),
+    )
+
     delete_btn = ft.IconButton(
         icon=ft.Icons.DELETE,
         icon_color='#FF5252',
@@ -677,6 +747,7 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
 
     return ft.Container(
         content=ft.Column([
+            section_field,
             ft.Row([
                 ft.Container(
                     content=ft.Text(type_display, size=11, color='white'),
@@ -687,7 +758,7 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
                 ft.Container(expand=True),
                 delete_btn,
             ], spacing=8),
-            ft.Row([question_text_field, type_dropdown], spacing=10),
+            ft.Row([question_text_field, type_dropdown, required_switch], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Divider(height=5, color='transparent'),
             options_column,
             ft.Divider(height=5, color='transparent'),
@@ -697,6 +768,7 @@ def _build_question_card(question: dict, index: int, on_refresh, temp_questions=
         border_radius=10,
         border=ft.Border.all(width=1, color='#E8E8E8'),
         padding=14,
+        data=qid,
     )
 
 
@@ -724,6 +796,63 @@ def _on_question_text_change(question_id: int, new_text: str, temp_questions=Non
             for q in temp_questions:
                 if q['id'] == question_id:
                     q['question_text'] = new_text
+                    break
+
+
+def _on_section_title_change(question_id: int, new_title: str, temp_questions=None):
+    """部分标题变更：本题开启一个新部分，标题跟随其后题目直到下一个标题"""
+    new_title = (new_title or '').strip()
+    if question_id > 0:
+        # 从 temp_questions 获取原题目的其余字段，避免覆盖为 NULL
+        qtype = None
+        qopts = None
+        qhint = None
+        qtext = None
+        if temp_questions:
+            for q in temp_questions:
+                if q['id'] == question_id:
+                    qtype = q.get('question_type')
+                    qopts = q.get('options')
+                    qhint = q.get('hint')
+                    qtext = q.get('question_text')
+                    q['section_title'] = new_title
+                    break
+        if qtype:
+            update_question(question_id, qtext, qtype, qopts, hint=qhint, section_title=new_title)
+    else:
+        # 新建模式，只更新内存中的题目列表
+        if temp_questions:
+            for q in temp_questions:
+                if q['id'] == question_id:
+                    q['section_title'] = new_title
+                    break
+
+
+def _on_required_change(question_id: int, new_value: bool, temp_questions=None):
+    """是否必答开关变更"""
+    if question_id > 0:
+        # 从 temp_questions 获取原题目的其余字段，避免覆盖为 NULL
+        qtype = None
+        qopts = None
+        qhint = None
+        qtext = None
+        if temp_questions:
+            for q in temp_questions:
+                if q['id'] == question_id:
+                    qtype = q.get('question_type')
+                    qopts = q.get('options')
+                    qhint = q.get('hint')
+                    qtext = q.get('question_text')
+                    q['is_required'] = new_value
+                    break
+        if qtype:
+            update_question(question_id, qtext, qtype, qopts, hint=qhint, is_required=new_value)
+    else:
+        # 新建模式，只更新内存中的题目列表
+        if temp_questions:
+            for q in temp_questions:
+                if q['id'] == question_id:
+                    q['is_required'] = new_value
                     break
 
 
@@ -777,6 +906,23 @@ def _on_question_type_change(question_id: int, new_type: str, question_index: in
         threading.Timer(0.05, lambda: on_single_refresh(question_index)).start()
 
 
+def _clean_exclusive(val) -> list:
+    """规范化互斥选项索引列表：只保留非负整数、去重、升序"""
+    if not isinstance(val, list):
+        return []
+    out = []
+    for v in val:
+        if isinstance(v, bool):
+            continue
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            continue
+        if iv >= 0 and iv not in out:
+            out.append(iv)
+    return sorted(out)
+
+
 def _option_as_obj(opt):
     """将选项统一为对象格式（兼容旧字符串）"""
     if isinstance(opt, dict):
@@ -784,8 +930,9 @@ def _option_as_obj(opt):
             'label': str(opt.get('label', opt.get('text', ''))),
             'requires_open': bool(opt.get('requires_open', False)),
             'open_hint': str(opt.get('open_hint', '') or ''),
+            'exclusive_with': _clean_exclusive(opt.get('exclusive_with')),
         }
-    return {'label': str(opt), 'requires_open': False, 'open_hint': ''}
+    return {'label': str(opt), 'requires_open': False, 'open_hint': '', 'exclusive_with': []}
 
 
 def _on_option_change(question_id: int, option_idx: int, new_value: str, temp_questions=None):
@@ -987,8 +1134,27 @@ def _raw_options_of(question_id: int, temp_questions=None) -> list:
     return []
 
 
+def _fix_exclusive_after_remove(opts: list, removed_idx: int):
+    """删除索引 removed_idx 后，修正其余选项的互斥索引：
+    - 指向 removed_idx 的互斥关系移除
+    - 大于 removed_idx 的索引减 1
+    """
+    for o in opts:
+        if not isinstance(o, dict):
+            continue
+        ex = o.get('exclusive_with', [])
+        if not ex:
+            continue
+        new_ex = []
+        for v in ex:
+            if v == removed_idx:
+                continue
+            new_ex.append(v - 1 if v > removed_idx else v)
+        o['exclusive_with'] = sorted(set(new_ex))
+
+
 def _remove_option(question_id: int, option_idx: int, on_refresh, temp_questions=None):
-    """删除选项"""
+    """删除选项（同步修正互斥索引）"""
     if question_id > 0:
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -998,6 +1164,7 @@ def _remove_option(question_id: int, option_idx: int, on_refresh, temp_questions
                 opts = json.loads(row[2])
                 if option_idx < len(opts):
                     opts.pop(option_idx)
+                    _fix_exclusive_after_remove(opts, option_idx)
                     update_question(question_id, row[0], row[1], options=opts, hint=row[3])
     elif temp_questions:
         for q in temp_questions:
@@ -1005,9 +1172,111 @@ def _remove_option(question_id: int, option_idx: int, on_refresh, temp_questions
                 opts = q.get('options', [])
                 if option_idx < len(opts):
                     opts.pop(option_idx)
+                    _fix_exclusive_after_remove(opts, option_idx)
                     q['options'] = opts
                 break
     threading.Timer(0.05, on_refresh).start()
+
+
+def _on_exclusive_click(e, question_id: int, option_idx: int, temp_questions=None, on_refresh=None):
+    """多选题：设置某个选项与其他选项的互斥关系（不能同时选择）。
+    互斥关系对称维护：A 与 B 互斥时，双方的 exclusive_with 均记录对方。
+    """
+    try:
+        page = e.control.page
+    except Exception:
+        return
+    if page is None:
+        return
+
+    # 定位题目与选项
+    q = None
+    for tq in temp_questions or []:
+        if tq['id'] == question_id:
+            q = tq
+            break
+    if q is None:
+        return
+    opts = [_option_as_obj(o) for o in q.get('options', [])]
+    if option_idx >= len(opts):
+        return
+
+    my_label = opts[option_idx].get('label', '')
+    cur_set = set(_clean_exclusive(opts[option_idx].get('exclusive_with')))
+
+    # 其他选项的 Checkbox
+    checkboxes = {}
+    rows = []
+    for i, o in enumerate(opts):
+        if i == option_idx:
+            continue
+        lbl = o.get('label', '') or f'选项{chr(65 + i)}'
+        cb = ft.Checkbox(
+            label=lbl,
+            value=(i in cur_set),
+            fill_color='#1976D2',
+        )
+        checkboxes[i] = cb
+        rows.append(ft.Row([cb], spacing=2))
+
+    dlg = ft.AlertDialog(
+        title=ft.Text(f'互斥设置：{my_label}', size=16, weight=ft.FontWeight.W_600),
+        content=ft.Column(
+            [ft.Text('选择不能与「%s」同时选择的选项：' % my_label, size=14, color='#616161')] + rows,
+            spacing=6, scroll=ft.ScrollMode.AUTO),
+        modal=True,
+    )
+
+    def close_dlg():
+        dlg.open = False
+        try:
+            page.update()
+        except Exception:
+            pass
+
+    def confirm(e2):
+        new_set = {i for i, cb in checkboxes.items() if cb.value}
+        # 对称维护互斥关系
+        for j in new_set - cur_set:
+            if j < len(opts):
+                lst = opts[j].get('exclusive_with', [])
+                if option_idx not in lst:
+                    lst.append(option_idx)
+        for j in cur_set - new_set:
+            if j < len(opts):
+                lst = opts[j].get('exclusive_with', [])
+                if option_idx in lst:
+                    lst.remove(option_idx)
+        opts[option_idx]['exclusive_with'] = sorted(new_set)
+        q['options'] = opts
+
+        # 已保存题目：同步数据库
+        if question_id > 0:
+            try:
+                update_question(question_id, q.get('question_text', ''),
+                                q.get('question_type', 'multiple_choice'),
+                                options=opts, hint=q.get('hint', ''))
+            except Exception as ex:
+                close_dlg()
+                try:
+                    snack = ft.SnackBar(ft.Text(f'保存互斥设置失败: {ex}', size=14), bgcolor='#FF5252')
+                    page.overlay.append(snack)
+                    snack.open = True
+                    page.update()
+                except Exception:
+                    pass
+                return
+        close_dlg()
+        if on_refresh:
+            threading.Timer(0.05, on_refresh).start()
+
+    dlg.actions = [
+        ft.TextButton(content='取消', on_click=lambda e2: close_dlg()),
+        ft.ElevatedButton(content='确定', on_click=confirm),
+    ]
+    page.overlay.append(dlg)
+    dlg.open = True
+    page.update()
 
 
 def _delete_question_handler(question_id: int, is_new: bool, on_refresh, temp_questions=None):

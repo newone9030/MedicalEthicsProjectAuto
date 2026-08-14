@@ -514,7 +514,6 @@ def _build_consent_page(page: ft.Page) -> ft.View:
         label='我已阅读上述说明，并愿意继续进入本研究系统',
         value=False,
         fill_color='#1976D2',
-        label_style=ft.TextStyle(size=16),
     )
 
     continue_btn = ft.ElevatedButton(
@@ -768,13 +767,15 @@ def _build_survey_page(page: ft.Page, task_id: int, readonly: bool = False) -> f
     def go_back():
         _navigate(page, 'dashboard')
 
+    compact = bool(page.width) and page.width < 600
     return ft.View(
         route='/student/survey',
         scroll=ft.ScrollMode.AUTO,
+        padding=0,
         controls=[
             ft.Container(
                 content=ft.Column(build_survey_taker_view(page, task_id, on_back=go_back, readonly=readonly)),
-                padding=24,
+                padding=12 if compact else 24,
                 expand=True,
             ),
         ],
@@ -1008,4 +1009,4 @@ DB_PATH = os.path.join(mount_path, "survey.db")
 if __name__ == '__main__':
     ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
          , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
-    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+     ##ft.app(target=main, view=ft.AppView.WEB_BROWSER)

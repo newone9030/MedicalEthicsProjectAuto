@@ -96,7 +96,9 @@ def _create_sqlite_tables(conn):
             sort_order INTEGER DEFAULT 0,
             open_text_enabled INTEGER DEFAULT 0,
             open_text_title VARCHAR2(200),
-            open_text_hint VARCHAR2(500)
+            open_text_hint VARCHAR2(500),
+            section_title VARCHAR2(200),
+            is_required INTEGER DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS tasks (
@@ -212,6 +214,18 @@ def _create_sqlite_tables(conn):
         cursor.execute("ALTER TABLE case_questions ADD COLUMN open_text_hint VARCHAR2(500)")
         conn.commit()
         print('[DB] 已添加 case_questions.open_text_hint 字段')
+
+    # 增量迁移：为题目补充分组标题（部分标题）字段
+    if 'section_title' not in q_cols:
+        cursor.execute("ALTER TABLE case_questions ADD COLUMN section_title VARCHAR2(200)")
+        conn.commit()
+        print('[DB] 已添加 case_questions.section_title 字段')
+
+    # 增量迁移：为题目补充是否必答字段（旧题默认必答）
+    if 'is_required' not in q_cols:
+        cursor.execute("ALTER TABLE case_questions ADD COLUMN is_required INTEGER DEFAULT 1")
+        conn.commit()
+        print('[DB] 已添加 case_questions.is_required 字段')
 
     # 增量迁移：为反馈选项补充 comment_hint 字段
     cursor.execute("PRAGMA table_info(feedback_question_options)")

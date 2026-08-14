@@ -12,6 +12,11 @@ from app.response.response_service import save_draft, submit_response, get_draft
 from app.student.feedback_service import has_feedback
 
 
+def is_mobile_width(page: ft.Page) -> bool:
+    """判断当前视口是否为手机窄屏（用于收窄内边距）"""
+    return bool(page) and bool(page.width) and page.width < 600
+
+
 def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly: bool = False) -> list:
     """问卷作答视图 - 逐题显示，数据延迟加载"""
     user = page.session.store.get('user')
@@ -225,7 +230,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 return sum(1 for key, val in all_answers.items()
                            if val is not None and val != '' and
                            (not isinstance(val, (list, dict)) or len(val) > 0) and
-                           not (isinstance(val, dict) and not val.get('options') and not val.get('open_text')))
+                           not (isinstance(val, dict) and not val.get('options') and not val.get('open_text') and not val.get('option')))
 
             def update_progress():
                 completed = count_completed()
@@ -269,7 +274,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 case_label.update()
 
                 question_container.controls.clear()
-                w = _build_question_widget(question, f"{case['id']}_{question['id']}", all_answers, readonly)
+                w = _build_question_widget(question, f"{case['id']}_{question['id']}", all_answers, readonly, page)
                 question_container.controls.append(w)
                 question_container.update()
 
@@ -319,9 +324,10 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     for q in questions:
                         key = f"{case['id']}_{q['id']}"
                         ans = all_answers.get(key)
-                        if (ans is None or ans == '' or
+                        is_required = bool(q.get('is_required', True))
+                        if (is_required and (ans is None or ans == '' or
                                 (isinstance(ans, list) and len(ans) == 0) or
-                                (isinstance(ans, dict) and not ans.get('options') and not ans.get('open_text'))):
+                                (isinstance(ans, dict) and not ans.get('options') and not ans.get('open_text') and not ans.get('option')))):
                             case_unanswered.append((case['title'], q['question_text'][:30]))
                         else:
                             case_answers[q['id']] = ans
@@ -335,9 +341,9 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     if len(all_unanswered) > 8:
                         lines.append(f'... 及其他 {len(all_unanswered) - 8} 题')
                     dlg = ft.AlertDialog(
-                        title=ft.Text('\u8BF7\u5B8C\u6210\u6240\u6709\u9898\u76EE', size=16),
+                        title=ft.Text('\u8BF7\u5B8C\u6210\u6240\u6709\u5FC5\u7B54\u9898', size=16),
                         content=ft.Text(
-                            f'\u4EE5\u4E0B {len(all_unanswered)} \u9053\u9898\u5C1A\u672A\u4F5C\u7B54\uFF1A\n\n' + '\n'.join(lines),
+                            f'\u4EE5\u4E0B {len(all_unanswered)} \u9053\u5FC5\u7B54\u9898\u5C1A\u672A\u4F5C\u7B54\uFF1A\n\n' + '\n'.join(lines),
                             size=15),
                         actions=[ft.TextButton(content=ft.Text('\u77E5\u9053\u4E86', size=15),
                                                 on_click=lambda e: _close_overlay_dlg(dlg))],
@@ -472,7 +478,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 content=question_container,
                 bgcolor='white',
                 border_radius=12,
-                padding=20,
+                padding=16 if is_mobile_width(page) else 20,
                 shadow=ft.BoxShadow(spread_radius=0.5, blur_radius=8, color='#00000015'),
                 expand=True,
             ),
@@ -488,17 +494,21 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
     ]
 
 
-def _build_question_widget(question: dict, key: str, answers: dict, readonly: bool) -> ft.Container:
+def _build_question_widget(question: dict, key: str, answers: dict, readonly: bool,
+                           page: ft.Page = None) -> ft.Container:
     """构建单个题目组件"""
     qid = question['id']
     qtype = question['question_type']
+    is_required = bool(question.get('is_required', True))
     current_val = answers.get(key)
 
-    is_unanswered = not readonly and (
+    unanswered_raw = (
         current_val is None or current_val == '' or
         (isinstance(current_val, list) and len(current_val) == 0) or
-        (isinstance(current_val, dict) and not current_val.get('options') and not current_val.get('open_text'))
+        (isinstance(current_val, dict) and not current_val.get('options') and not current_val.get('open_text') and not current_val.get('option'))
     )
+    # 仅必答题未作答时标红提醒
+    is_unanswered = not readonly and is_required and unanswered_raw
     border_color = '#FF5252' if is_unanswered else '#E0E0E0'
 
     def on_answer_change(val):
@@ -601,9 +611,24 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
             else:
                 selected = []
                 selected_open_text = ''
+            # 归一化选项（携带 index 与互斥配置），供互斥校验使用
+            norm_opts = []
+            for i, opt in enumerate(opts):
+                if isinstance(opt, dict):
+                    excl_idx = []
+                    for x in (opt.get('exclusive_with') or []):
+                        if isinstance(x, bool):
+                            continue
+                        if isinstance(x, int) and x >= 0:
+                            excl_idx.append(x)
+                        elif isinstance(x, str) and x.isdigit():
+                            excl_idx.append(int(x))
+                    norm_opts.append({'label': opt.get('label', ''), 'index': i, 'exclusive_with': excl_idx})
+                else:
+                    norm_opts.append({'label': str(opt), 'index': i, 'exclusive_with': []})
             check_items = []
-            for opt in opts:
-                label = opt.get('label', '') if isinstance(opt, dict) else str(opt)
+            for opt in norm_opts:
+                label = opt['label']
                 is_checked = label in selected
                 check_items.append(
                     ft.Container(
@@ -612,7 +637,9 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                                 value=is_checked,
                                 fill_color='#1976D2',
                                 disabled=readonly,
-                                on_change=lambda e, l=label: _on_check_toggle(l, key, answers, open_enabled),
+                                on_change=(lambda e, o=opt: _on_check_toggle(o['label'], key, answers, open_enabled,
+                                                                            norm_opts, page, e.control))
+                                if not readonly else None,
                             ),
                             ft.Text(label, size=16, color='#212121',
                                     overflow=ft.TextOverflow.VISIBLE, expand=True,
@@ -621,7 +648,8 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                         padding=ft.Padding(4, 6, 4, 6),
                         border_radius=8,
                         bgcolor='#E3F2FD' if is_checked else None,
-                        on_click=None if readonly else (lambda e, l=label: _on_check_toggle(l, key, answers, open_enabled)),
+                        on_click=None if readonly else (lambda e, o=opt: _on_check_toggle(o['label'], key, answers, open_enabled,
+                                                                                          norm_opts, page)),
                     )
                 )
             multi_controls = [ft.Column(check_items, spacing=4)]
@@ -683,16 +711,42 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
     type_label = type_labels.get(qtype, qtype)
 
     column_controls = []
-    column_controls.append(
-        ft.Row([
+    # 部分标题（分组标题）：本题开启一个新部分时，在题目上方显示标题栏
+    section_title = (question.get('section_title') or '').strip()
+    if section_title:
+        column_controls.append(
             ft.Container(
-                content=ft.Text(type_label, size=13, color='white'),
-                bgcolor='#1976D2', border_radius=10,
-                padding=ft.Padding(8, 2, 8, 2),
-            ),
-            ft.Container(width=8, height=8, border_radius=4,
-                         bgcolor='#FF5252' if is_unanswered else 'transparent'),
-        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                content=ft.Row([
+                    ft.Container(width=4, height=20, bgcolor='#1976D2', border_radius=2),
+                    ft.Text(section_title, size=18, weight=ft.FontWeight.BOLD, color='#1565C0',
+                            overflow=ft.TextOverflow.VISIBLE),
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                bgcolor='#E3F2FD',
+                border_radius=8,
+                padding=ft.Padding(12, 8, 12, 8),
+            )
+        )
+        column_controls.append(ft.Divider(height=6, color='transparent'))
+    header_row_controls = [
+        ft.Container(
+            content=ft.Text(type_label, size=13, color='white'),
+            bgcolor='#1976D2', border_radius=10,
+            padding=ft.Padding(8, 2, 8, 2),
+        ),
+        ft.Container(width=8, height=8, border_radius=4,
+                     bgcolor='#FF5252' if is_unanswered else 'transparent'),
+    ]
+    if is_required:
+        header_row_controls.append(
+            ft.Container(
+                content=ft.Text('必答', size=12, color='#FF5252'),
+                border=ft.Border.all(width=1, color='#FF5252'),
+                border_radius=6,
+                padding=ft.Padding(6, 1, 6, 1),
+            )
+        )
+    column_controls.append(
+        ft.Row(header_row_controls, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
     )
     column_controls.append(ft.Divider(height=8, color='transparent'))
     column_controls.append(
@@ -729,7 +783,7 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
         bgcolor='#FAFAFA',
         border_radius=10,
         border=ft.Border.all(width=1, color=border_color),
-        padding=16,
+        padding=12 if is_mobile_width(page) else 16,
     )
 
 
@@ -751,32 +805,82 @@ def _on_open_text_change(option_label: str, value: str, key: str, answers: dict)
     answers[key] = {'option': option_label, 'open_text': value}
 
 
-def _on_check_toggle(option_label: str, key: str, answers: dict, open_enabled: bool = False):
+def _on_check_toggle(option_label: str, key: str, answers: dict, open_enabled: bool = False,
+                     norm_opts: list = None, page: ft.Page = None, control: ft.Checkbox = None):
     """多选：切换某个选项的选中状态
 
     若题目启用了开放式文本框，答案保存为 dict: {'options': [...], 'open_text': '...'}
+    若选项配置了互斥关系（exclusive_with），与已选中的互斥选项冲突时阻止勾选并提示。
     """
     cur = answers.get(key)
     # 兼容 dict 答案
     if isinstance(cur, dict):
         selected = cur.get('options', []) if isinstance(cur.get('options'), list) else []
-        if option_label in selected:
-            selected.remove(option_label)
-        else:
-            selected.append(option_label)
-        answers[key] = {'options': selected, 'open_text': cur.get('open_text', '')}
-        return
-    # list / 首次作答
-    selected = cur if isinstance(cur, list) else []
+        open_text = cur.get('open_text', '')
+    else:
+        selected = cur if isinstance(cur, list) else []
+        open_text = ''
+
     if option_label in selected:
         selected.remove(option_label)
     else:
+        # 互斥校验：勾选前检查与已选中的选项是否冲突
+        if _check_exclusive_conflict(option_label, selected, norm_opts):
+            if control is not None:
+                try:
+                    control.value = False
+                    control.update()
+                except Exception:
+                    pass
+            _show_snack_page(page, f'选项「{option_label}」与「{_find_conflict_label(option_label, selected, norm_opts)}」不能同时选择', success=False)
+            return
         selected.append(option_label)
+
     if open_enabled:
         # 题目启用了开放式文本框，保存 dict 结构
-        answers[key] = {'options': selected, 'open_text': ''}
+        answers[key] = {'options': selected, 'open_text': open_text}
     else:
         answers[key] = selected
+
+
+def _check_exclusive_conflict(label: str, selected: list, norm_opts: list) -> bool:
+    """判断 label 是否与已选中选项存在互斥冲突"""
+    return _find_conflict_label(label, selected, norm_opts) is not None
+
+
+def _find_conflict_label(label: str, selected: list, norm_opts: list):
+    """返回与 label 互斥冲突的已选中选项 label；无冲突返回 None"""
+    if not norm_opts or not selected:
+        return None
+    idx_map = {o['label']: o['index'] for o in norm_opts}
+    excl_map = {o['label']: set(o.get('exclusive_with') or []) for o in norm_opts}
+    my_idx = idx_map.get(label)
+    if my_idx is None:
+        return None
+    for sel in selected:
+        sel_idx = idx_map.get(sel)
+        if sel_idx is None:
+            continue
+        if my_idx in excl_map.get(sel, set()) or sel_idx in excl_map.get(label, set()):
+            return sel
+    return None
+
+
+def _show_snack_page(page: ft.Page, msg: str, success: bool = True):
+    """页面级 SnackBar 提示（用于互斥冲突等）"""
+    if page is None:
+        return
+    try:
+        snack = ft.SnackBar(
+            ft.Text(msg, size=14),
+            bgcolor='#4CAF50' if success else '#FF5252',
+            duration=2500,
+        )
+        page.overlay.append(snack)
+        snack.open = True
+        page.update()
+    except Exception:
+        pass
 
 
 def _on_multi_open_text_change(value: str, key: str, answers: dict):
