@@ -12,6 +12,9 @@ from app.auth.feedback_admin_service import (
     get_feedback_task_mappings, add_feedback_task_mapping, remove_feedback_task_mapping,
     get_all_survey_questions,
 )
+from app.student.feedback_service import (
+    get_feedback_submitters, get_student_feedback, delete_student_feedback,
+)
 
 CATEGORY_LABELS = {
     'case': '案例评价',
@@ -128,6 +131,53 @@ def build_feedback_task_list_view(page: ft.Page, on_back, on_create_task) -> lis
         )
         page.show_dialog(choice_dlg)
 
+    def _open_submitters_dialog(e=None):
+        """打开"反馈作答管理"对话框：查看 / 删除作答者的反馈内容"""
+        list_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True)
+
+        def refresh():
+            list_col.controls.clear()
+            submitters = get_feedback_submitters()
+            if not submitters:
+                list_col.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.INBOX_OUTLINED, size=48, color='#BDBDBD'),
+                            ft.Text('暂无作答者，尚无学生提交反馈', size=14, color='#9E9E9E'),
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+                        padding=40,
+                        alignment=ft.Alignment.CENTER,
+                    )
+                )
+            else:
+                for s in submitters:
+                    list_col.controls.append(_build_submitter_card(page, s, refresh, show_snack))
+            try:
+                if list_col.page is not None:
+                    list_col.update()
+            except Exception:
+                pass
+
+        def close(e):
+            dlg.open = False
+            page.update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text('反馈作答管理', size=18, weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=list_col,
+                width=620,
+                height=480,
+                padding=ft.Padding(0, 4, 0, 4),
+            ),
+            actions=[
+                ft.TextButton('关闭', on_click=close),
+            ],
+        )
+        page.show_dialog(dlg)
+        refresh()
+
     _populate_task_list()
 
     header_bar = ft.Row([
@@ -135,6 +185,15 @@ def build_feedback_task_list_view(page: ft.Page, on_back, on_create_task) -> lis
                      icon_color='#1976D2', tooltip='返回仪表盘', icon_size=22),
         ft.Text('反馈任务维护', size=22, weight=ft.FontWeight.BOLD, color='#212121'),
         ft.Container(expand=True),
+        ft.OutlinedButton(
+            content='作答管理',
+            icon=ft.Icons.RATE_REVIEW,
+            on_click=lambda e: _open_submitters_dialog(),
+            style=ft.ButtonStyle(
+                color='#1976D2',
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+        ),
         ft.ElevatedButton(
             content='创建任务',
             icon=ft.Icons.ADD,
@@ -206,6 +265,160 @@ def _build_task_card(page, task, refresh_list, show_snack, on_create_task):
         border_radius=12,
         padding=ft.Padding(16, 12, 8, 12),
         shadow=ft.BoxShadow(spread_radius=0.5, blur_radius=6, color='#00000010'),
+    )
+
+
+def _fmt_time(ts):
+    """格式化时间字符串，仅显示到分钟"""
+    if not ts:
+        return '—'
+    s = str(ts)
+    return s[:16] if len(s) > 16 else s
+
+
+def _build_feedback_detail_dialog(page: ft.Page, student_label: str, items: list) -> ft.AlertDialog:
+    """作答者反馈内容明细对话框"""
+
+    def close_dlg(e):
+        dlg.open = False
+        page.update()
+
+    if not items:
+        body = ft.Container(
+            content=ft.Column([
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=48, color='#BDBDBD'),
+                ft.Text('暂无反馈内容', size=16, color='#757575'),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            padding=30,
+            alignment=ft.Alignment.CENTER,
+            width=560,
+        )
+    else:
+        content_col = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
+        last_group = None
+        for item in items:
+            if item['group_title'] != last_group:
+                last_group = item['group_title']
+                content_col.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.SUBJECT, color='#1565C0', size=18),
+                            ft.Text(item['group_title'], size=16,
+                                    weight=ft.FontWeight.BOLD, color='#1565C0'),
+                        ], spacing=6),
+                        bgcolor='#E3F2FD',
+                        border_radius=8,
+                        padding=ft.Padding(12, 8, 12, 8),
+                    )
+                )
+            answer_text = item['answer_text'] or '（未作答）'
+            q_col = ft.Column(spacing=4)
+            q_col.controls.append(
+                ft.Text(item['question_text'], size=14, weight=ft.FontWeight.W_500, color='#212121')
+            )
+            q_col.controls.append(
+                ft.Container(
+                    content=ft.Text(answer_text, size=14, color='#1565C0'),
+                    padding=ft.Padding(12, 8, 12, 8),
+                    bgcolor='#FAFAFA',
+                    border_radius=6,
+                    width=520,
+                )
+            )
+            content_col.controls.append(q_col)
+        body = ft.Container(content=content_col, width=560, height=460)
+
+    dlg = ft.AlertDialog(
+        title=ft.Text(f'{student_label} 的反馈内容', size=17, weight=ft.FontWeight.BOLD),
+        content=body,
+        actions=[
+            ft.TextButton('关闭', on_click=close_dlg),
+        ],
+        modal=True,
+    )
+    return dlg
+
+
+def _build_submitter_card(page: ft.Page, s: dict, refresh, show_snack) -> ft.Container:
+    """构建单个作答者卡片：查看 / 删除反馈内容"""
+    sid = s['student_id']
+    display = (f"{s['real_name']}（{s['username']}）"
+               if s['real_name'] and s['real_name'] != s['username'] else s['username'])
+
+    def on_view(e):
+        items = get_student_feedback(sid)
+        page.show_dialog(_build_feedback_detail_dialog(page, display, items))
+
+    def on_delete(e):
+        def do_delete(ev):
+            confirm_dlg.open = False
+            page.update()
+            try:
+                delete_student_feedback(sid)
+                show_snack(f'已删除「{display}」的反馈内容', True)
+                refresh()
+            except Exception as ex:
+                show_snack(f'删除失败: {ex}', False)
+
+        def cancel_delete(ev):
+            confirm_dlg.open = False
+            page.update()
+
+        confirm_dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text('删除反馈内容', size=17, weight=ft.FontWeight.BOLD),
+            content=ft.Text(
+                f'确定要删除「{display}」的全部反馈内容吗？\n'
+                f'共 {s["answer_count"]} 条作答记录，删除后不可恢复。'
+            ),
+            actions=[
+                ft.TextButton('取消', on_click=cancel_delete),
+                ft.ElevatedButton(
+                    '确认删除',
+                    on_click=do_delete,
+                    style=ft.ButtonStyle(bgcolor='#E53935', color='white',
+                                          shape=ft.RoundedRectangleBorder(radius=8)),
+                ),
+            ],
+        )
+        page.show_dialog(confirm_dlg)
+
+    return ft.Container(
+        content=ft.Row([
+            ft.Container(
+                content=ft.Icon(ft.Icons.PERSON, color='white', size=18),
+                bgcolor='#1976D2',
+                border_radius=20,
+                padding=ft.Padding(9, 9, 9, 9),
+            ),
+            ft.Column([
+                ft.Text(display, size=14, weight=ft.FontWeight.W_600, color='#212121'),
+                ft.Text(
+                    f"班级：{s['class_name'] or '—'}    {s['answer_count']} 条作答",
+                    size=12, color='#757575',
+                ),
+            ], spacing=2, expand=True),
+            ft.Column([
+                ft.Text('最近提交', size=11, color='#9E9E9E'),
+                ft.Text(_fmt_time(s['last_submitted_at']), size=12, color='#616161'),
+            ], spacing=1, horizontal_alignment=ft.CrossAxisAlignment.END),
+            ft.TextButton(
+                content='查看',
+                icon=ft.Icons.VISIBILITY,
+                on_click=on_view,
+                style=ft.ButtonStyle(color='#1976D2'),
+            ),
+            ft.TextButton(
+                content='删除',
+                icon=ft.Icons.DELETE_OUTLINE,
+                on_click=on_delete,
+                style=ft.ButtonStyle(color='#E53935'),
+            ),
+        ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        bgcolor='white',
+        border_radius=10,
+        padding=ft.Padding(12, 10, 12, 10),
+        shadow=ft.BoxShadow(spread_radius=0.5, blur_radius=6, color='#0000000A'),
     )
 
 

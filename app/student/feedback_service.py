@@ -180,6 +180,40 @@ def submit_feedbacks(student_id: int, feedbacks: list) -> dict:
         return {'success': True, 'message': '反馈已提交'}
 
 
+def get_feedback_submitters() -> list:
+    """
+    获取所有提交过反馈的学生（作答者）列表
+    返回 [{'student_id', 'username', 'real_name', 'class_name',
+           'answer_count', 'first_submitted_at', 'last_submitted_at'}, ...]
+    按最近提交时间倒序排列
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.id, u.username, u.real_name, u.class_name,
+                   COUNT(fr.id),
+                   MIN(fr.created_at),
+                   MAX(fr.created_at)
+            FROM feedback_responses fr
+            JOIN users u ON fr.student_id = u.id
+            GROUP BY u.id, u.username, u.real_name, u.class_name
+            ORDER BY MAX(fr.created_at) DESC
+        """)
+        rows = cursor.fetchall()
+        return [
+            {
+                'student_id': r[0],
+                'username': r[1],
+                'real_name': r[2],
+                'class_name': r[3],
+                'answer_count': r[4],
+                'first_submitted_at': r[5],
+                'last_submitted_at': r[6],
+            }
+            for r in rows
+        ]
+
+
 def has_feedback(student_id: int) -> bool:
     """检查学生是否已提交反馈"""
     with get_connection() as conn:
