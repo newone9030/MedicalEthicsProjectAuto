@@ -274,7 +274,13 @@ def build_login_view(page: ft.Page) -> list:
     # 延迟刷新 SegmentedButton，修复首次加载时中文文字宽度计算不准确的问题
     async def _fix_segmented_button():
         await asyncio.sleep(0.05)
-        role_tabs.update()
+        # 延迟期间用户可能已快速登录、页面被切换，控件已脱离页面树，
+        # 此时直接 update 会抛 "Control must be added to the page first"，需兜底
+        try:
+            if role_tabs.parent is not None:
+                role_tabs.update()
+        except Exception:
+            pass
 
     page.run_task(_fix_segmented_button)
 

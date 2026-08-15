@@ -16,6 +16,7 @@ _engine = None           # 'sqlite' 或 'oracle'
 _sqlite_conn = None      # SQLite 单连接
 _oracle_pool = None      # Oracle 连接池
 _lock = threading.Lock()
+_sqlite_lock = threading.RLock()   # SQLite 单连接并发访问锁（可重入，支持嵌套 get_connection）
 _initialized = False
 
 # SQLite 数据库文件路径
@@ -109,6 +110,7 @@ def _create_sqlite_tables(conn):
             end_time TIMESTAMP,
             status VARCHAR2(20) DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'active', 'closed')),
             task_type VARCHAR2(20) DEFAULT 'survey' CHECK(task_type IN ('survey', 'background')),
+            sort_order INTEGER DEFAULT 0,
             created_by INTEGER REFERENCES users(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -192,6 +194,19 @@ def _create_sqlite_tables(conn):
         cursor.execute("ALTER TABLE tasks ADD COLUMN task_type VARCHAR2(20) DEFAULT 'survey'")
         conn.commit()
         print('[DB] 已添加 tasks.task_type 字段')
+
+    # 增量迁移：为旧表补充任务排序字段 sort_order（按创建顺序初始化，保证初始顺序稳定）
+    if 'sort_order' not in task_cols:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN sort_order INTEGER DEFAULT 0")
+        cursor.execute("""
+            UPDATE tasks SET sort_order = (
+                SELECT COUNT(*) FROM tasks AS t2
+                WHERE t2.created_at < tasks.created_at
+                   OR (t2.created_at = tasks.created_at AND t2.id < tasks.id)
+            )
+        """)
+        conn.commit()
+        print('[DB] 已添加 tasks.sort_order 字段')
 
     # 增量迁移：为旧表补充 hint 字段
     cursor.execute("PRAGMA table_info(case_questions)")
@@ -424,7 +439,9 @@ def get_connection():
         finally:
             conn.close()
     else:
-        yield _SqliteConnectionWrapper(_sqlite_conn)
+        # 全局单连接并发访问加锁，防止多线程（Timer 线程 + 主线程）同时操作导致卡死
+        with _sqlite_lock:
+            yield _SqliteConnectionWrapper(_sqlite_conn)
 
 
 def execute_sql(sql, params=None, fetch=False):
@@ -454,21 +471,22 @@ def execute_sql(sql, params=None, fetch=False):
         finally:
             conn.close()
     else:
-        cursor = _sqlite_conn.cursor()
-        adapted = _adapt_sql(sql)
-        if params:
-            if isinstance(params, dict):
-                cursor.execute(adapted, params)
+        with _sqlite_lock:
+            cursor = _sqlite_conn.cursor()
+            adapted = _adapt_sql(sql)
+            if params:
+                if isinstance(params, dict):
+                    cursor.execute(adapted, params)
+                else:
+                    cursor.execute(adapted, params)
             else:
-                cursor.execute(adapted, params)
-        else:
-            cursor.execute(adapted)
-        if fetch:
-            result = cursor.fetchall()
-        else:
-            result = cursor
-        _sqlite_conn.commit()
-        return result
+                cursor.execute(adapted)
+            if fetch:
+                result = cursor.fetchall()
+            else:
+                result = cursor
+            _sqlite_conn.commit()
+            return result
 
 
 def get_last_rowid(table_name):
@@ -487,8 +505,9 @@ def get_last_rowid(table_name):
         rows = execute_sql(f"SELECT {seq}.CURRVAL FROM DUAL", fetch=True)
         return rows[0][0] if rows else None
     else:
-        cursor = _sqlite_conn.cursor()
-        return cursor.lastrowid
+        with _sqlite_lock:
+            cursor = _sqlite_conn.cursor()
+            return cursor.lastrowid
 
 
 def close_db():

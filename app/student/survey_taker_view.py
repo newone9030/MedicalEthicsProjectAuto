@@ -4,12 +4,39 @@
 页面控件先加载，数据通过 page.run_task 延迟加载
 """
 import json
+import re
 import threading
 import flet as ft
-from app.task.task_service import get_task
+from app.task.task_service import get_task, get_background_task, is_task_unlocked_for_student
 from app.case.question_service import get_questions_by_case
-from app.response.response_service import save_draft, submit_response, get_draft_answers, get_submitted_answers, get_submission_status
-from app.student.feedback_service import has_feedback
+from app.response.response_service import (save_draft, submit_response, get_draft_answers,
+                                           get_submitted_answers, get_submission_status,
+                                           is_background_completed)
+
+
+# 开放性文本案例最少回答汉字数（ycs / test 账号豁免）
+MIN_OPEN_TEXT_CHARS = 50
+_EXEMPT_MIN_CHARS_USERNAMES = {'ycs', 'test'}
+
+
+def _count_chinese_chars(value) -> int:
+    """统计答案中的汉字数量（兼容字符串 / 列表 / 字典结构）"""
+    text = ''
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        text = value.get('open_text') or ''
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict) and item.get('open_text'):
+                parts.append(str(item['open_text']))
+            elif isinstance(item, str):
+                parts.append(item)
+        text = ''.join(parts)
+    if not isinstance(text, str):
+        text = str(text)
+    return len(re.findall(r'[\u4e00-\u9fff]', text))
 
 
 def is_mobile_width(page: ft.Page) -> bool:
@@ -21,6 +48,9 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
     """问卷作答视图 - 逐题显示，数据延迟加载"""
     user = page.session.store.get('user')
     student_id = user['id']
+
+    # 记录构建时的视图代际：页面切换后旧视图的延迟加载调度应立即停止
+    _view_gen = page.session.store.get('_view_generation') or 0
 
     # ================================================================
     # Phase 1: 立即构建 UI 骨架（不做任何 API 调用）
@@ -86,18 +116,50 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
 
     # SnackBar 辅助
     def _show_snack(msg: str, success: bool = True):
+        # 清理旧的 SnackBar，避免 overlay 控件无限累积导致页面越来越卡
+        for s in [s for s in page.overlay if isinstance(s, ft.SnackBar)]:
+            page.overlay.remove(s)
         snack = ft.SnackBar(ft.Text(msg, size=15), bgcolor='#4CAF50' if success else '#FF5252')
         page.overlay.append(snack)
         snack.open = True
         page.update()
 
-    def _navigate_to_feedback(_page):
-        """测试用户任务完成后，继续填写反馈任务"""
-        _page.go('/student/feedback')
-
     def _close_overlay_dlg(dialog):
+        # Flet 0.86.5 官方关闭方式：只 open=False + update。
+        # 不能发 remove 命令——show_dialog 已包装 on_dismiss，客户端确认关闭后
+        # 会自动把对话框移出对话框栈，手动 remove 反而导致模态框不消失。
+        # 注意：直接用闭包 page，dialog.page 在控件脱离树时可能抛异常。
         dialog.open = False
         page.update()
+
+    def _cleanup_stale_overlay(keep=None):
+        """清理对话框栈中已关闭的旧对话框（open=False），避免无限累积导致卡顿"""
+        dialogs = getattr(page, '_dialogs', None)
+        if dialogs is None:
+            return
+        for c in [c for c in dialogs.controls
+                  if isinstance(c, ft.AlertDialog) and c is not keep and not c.open]:
+            try:
+                page._remove_dialog(c)
+            except Exception:
+                pass
+
+    def _open_overlay_dlg(dlg):
+        """打开对话框（Flet 0.86.5 官方 API）：先清理旧对话框（防累积），
+        再 page.show_dialog 挂载（自动包装 on_dismiss，关闭后自动出栈）。"""
+        _cleanup_stale_overlay(keep=dlg)
+        dialogs = getattr(page, '_dialogs', None)
+        if dialogs is not None and dlg in dialogs.controls:
+            if dlg.open:
+                return  # 已在显示中，忽略重复触发
+            try:
+                page._remove_dialog(dlg)
+            except Exception:
+                pass
+        try:
+            page.show_dialog(dlg)
+        except RuntimeError:
+            pass
 
     # ================================================================
     # Phase 2: 数据加载（通过 page.run_task 延迟执行）
@@ -106,6 +168,10 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
     async def init_data():
         """异步加载所有数据并更新 UI"""
         try:
+            # 若页面已切换（代际变化），旧视图任务直接放弃，避免操作已移除控件
+            if (page.session.store.get('_view_generation') or 0) != _view_gen:
+                print('[survey] init_data 执行时视图已切换，放弃加载')
+                return
             task = get_task(task_id)
             if not task:
                 question_container.controls.clear()
@@ -122,6 +188,50 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     )
                 )
                 progress_text.value = '任务不存在'
+                case_label.value = ''
+                page.update()
+                return
+
+            # ---- 背景资料未完成时禁止作答（只读查看不受限） ----
+            if not readonly:
+                bg_task = get_background_task()
+                if bg_task and not is_background_completed(bg_task['id'], student_id):
+                    question_container.controls.clear()
+                    question_container.controls.append(
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Icon(ft.Icons.LOCK_OUTLINE, size=48, color='#FF9800'),
+                                ft.Text('请先完成背景资料调查', size=18, color='#FF9800'),
+                                ft.Text('返回任务列表填写背景资料后再进入作答', size=14, color='#757575'),
+                                ft.TextButton(content=ft.Text('返回', size=16),
+                                              on_click=lambda e: on_back() if on_back else None),
+                            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                            alignment=ft.Alignment(0, 0),
+                            expand=True,
+                        )
+                    )
+                    progress_text.value = '背景资料未完成'
+                    case_label.value = ''
+                    page.update()
+                    return
+
+            # ---- 顺序作答限制：前置任务未全部提交时禁止作答（只读查看不受限） ----
+            if not readonly and not is_task_unlocked_for_student(task_id, student_id):
+                question_container.controls.clear()
+                question_container.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.LOCK_OUTLINE, size=48, color='#FF9800'),
+                            ft.Text('请先完成前面的任务', size=18, color='#FF9800'),
+                            ft.Text('按任务顺序作答，完成前置任务后再进入本任务', size=14, color='#757575'),
+                            ft.TextButton(content=ft.Text('返回', size=16),
+                                          on_click=lambda e: on_back() if on_back else None),
+                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        alignment=ft.Alignment(0, 0),
+                        expand=True,
+                    )
+                )
+                progress_text.value = '任务未解锁'
                 case_label.value = ''
                 page.update()
                 return
@@ -349,10 +459,35 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                                                 on_click=lambda e: _close_overlay_dlg(dlg))],
                         modal=True,
                     )
-                    page.overlay.append(dlg)
-                    dlg.open = True
-                    page.update()
+                    _open_overlay_dlg(dlg)
                     return
+
+                # ---- 开放性文本案例逐题最少汉字预校验（ycs / test 账号豁免） ----
+                username = (page.session.store.get('user') or {}).get('username', '')
+                if username not in _EXEMPT_MIN_CHARS_USERNAMES:
+                    short_questions = []
+                    for case in active_cases:
+                        questions = all_questions_map.get(case['id'], [])
+                        if questions and all(q.get('question_type') == 'open' for q in questions):
+                            for q in questions:
+                                if not q.get('is_required', True):
+                                    continue  # 非必答题可跳过，不参与字数校验
+                                chars = _count_chinese_chars(all_answers.get(f"{case['id']}_{q['id']}"))
+                                if chars < MIN_OPEN_TEXT_CHARS:
+                                    short_questions.append((case['title'], q.get('question_text', '')[:30], chars))
+                    if short_questions:
+                        lines = [f'• [{title}] {qtext}（当前 {n} 个汉字）' for title, qtext, n in short_questions[:5]]
+                        if len(short_questions) > 5:
+                            lines.append(f'... 及其他 {len(short_questions) - 5} 道题')
+                        dlg = ft.AlertDialog(
+                            title=ft.Text(f'开放性文本题目回答不能少于 {MIN_OPEN_TEXT_CHARS} 个汉字', size=16),
+                            content=ft.Text('以下题目尚未达到最少字数：\n\n' + '\n'.join(lines), size=15),
+                            actions=[ft.TextButton(content=ft.Text('知道了', size=15),
+                                                    on_click=lambda e: _close_overlay_dlg(dlg))],
+                            modal=True,
+                        )
+                        _open_overlay_dlg(dlg)
+                        return
 
                 def do_submit_all(e2):
                     _close_overlay_dlg(self_check_dlg)
@@ -369,12 +504,9 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
 
                     if success_count == len(active_cases):
                         _show_snack(f'\u5168\u90E8 {success_count} \u4E2A\u6848\u4F8B\u5DF2\u63D0\u4EA4\u5B8C\u6210\uFF01')
-                        # 测试用户完成任务后，继续填写反馈任务
-                        _user_info = page.session.store.get('user') or {}
-                        if (_user_info.get('user_type') == 'test'
-                                and not has_feedback(student_id)):
-                            _navigate_to_feedback(page)
-                        elif on_back:
+                        # 作答完成一个任务后直接返回任务列表（测试用户也通过
+                        # dashboard 上的反馈入口在全部任务完成后填写反馈）
+                        if on_back:
                             on_back()
                     elif success_count > 0:
                         _show_snack(f'\u5DF2\u63D0\u4EA4 {success_count}/{len(active_cases)} \u4E2A\u6848\u4F8B\uFF0C\u8BF7\u91CD\u8BD5\u5931\u8D25\u7684\u6848\u4F8B')
@@ -414,9 +546,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     ],
                     modal=True,
                 )
-                page.overlay.append(self_check_dlg)
-                self_check_dlg.open = True
-                page.update()
+                _open_overlay_dlg(self_check_dlg)
 
             # ---- 绑定按钮事件 ----
             prev_btn.on_click = go_prev
@@ -449,9 +579,17 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
             page.update()
 
     # 调度数据加载任务：等待页面控件加载完成后才执行（挂载前不调用任何方法）
-    def _schedule_init():
+    def _schedule_init(retry: int = 0):
+        # 页面已切换（代际变化），旧视图调度立即停止，避免操作已移除控件
+        if (page.session.store.get('_view_generation') or 0) != _view_gen:
+            print('[survey] 视图已切换，放弃加载调度')
+            return
         if question_container.parent is None:
-            threading.Timer(0.05, _schedule_init).start()
+            # 限制最大重试次数，防止视图构建失败时无限递归创建线程导致卡死
+            if retry >= 100:
+                print('[survey] question_container 长时间未挂载，放弃调度')
+                return
+            threading.Timer(0.05, _schedule_init, args=[retry + 1]).start()
             return
         page.run_task(init_data)
 
@@ -632,24 +770,21 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                 is_checked = label in selected
                 check_items.append(
                     ft.Container(
-                        content=ft.Row([
-                            ft.Checkbox(
-                                value=is_checked,
-                                fill_color='#1976D2',
-                                disabled=readonly,
-                                on_change=(lambda e, o=opt: _on_check_toggle(o['label'], key, answers, open_enabled,
-                                                                            norm_opts, page, e.control))
-                                if not readonly else None,
-                            ),
-                            ft.Text(label, size=16, color='#212121',
-                                    overflow=ft.TextOverflow.VISIBLE, expand=True,
-                                    no_wrap=False),
-                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                        # 只用 Checkbox 单一事件绑定（on_change），
+                        # 避免 on_click + on_change 双重触发导致答案被抵消/状态错乱
+                        content=ft.Checkbox(
+                            value=is_checked,
+                            label=label,
+                            label_style=ft.TextStyle(size=16, color='#212121'),
+                            fill_color='#1976D2',
+                            disabled=readonly,
+                            on_change=(lambda e, o=opt: _on_check_toggle(o['label'], key, answers, open_enabled,
+                                                                         norm_opts, page, e.control))
+                            if not readonly else None,
+                        ),
                         padding=ft.Padding(4, 6, 4, 6),
                         border_radius=8,
                         bgcolor='#E3F2FD' if is_checked else None,
-                        on_click=None if readonly else (lambda e, o=opt: _on_check_toggle(o['label'], key, answers, open_enabled,
-                                                                                          norm_opts, page)),
                     )
                 )
             multi_controls = [ft.Column(check_items, spacing=4)]
@@ -871,6 +1006,9 @@ def _show_snack_page(page: ft.Page, msg: str, success: bool = True):
     if page is None:
         return
     try:
+        # 清理旧的 SnackBar，避免 overlay 控件无限累积导致页面越来越卡
+        for s in [s for s in page.overlay if isinstance(s, ft.SnackBar)]:
+            page.overlay.remove(s)
         snack = ft.SnackBar(
             ft.Text(msg, size=14),
             bgcolor='#4CAF50' if success else '#FF5252',

@@ -19,12 +19,17 @@ def create_task(name: str, description: str, start_time: datetime, end_time: dat
     with get_connection() as conn:
         cursor = conn.cursor()
 
+        # 新任务默认排到末尾
+        cursor.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tasks")
+        sort_order = cursor.fetchone()[0]
+
         cursor.execute("""
-            INSERT INTO tasks (name, description, start_time, end_time, status, task_type, created_by)
-            VALUES (:name, :desc, :stime, :etime, 'draft', :ttype, :cby)
+            INSERT INTO tasks (name, description, start_time, end_time, status, task_type, created_by, sort_order)
+            VALUES (:name, :desc, :stime, :etime, 'draft', :ttype, :cby, :sorder)
         """, {
             'name': name, 'desc': description,
-            'stime': start_time, 'etime': end_time, 'ttype': task_type, 'cby': created_by
+            'stime': start_time, 'etime': end_time, 'ttype': task_type, 'cby': created_by,
+            'sorder': sort_order
         })
 
         task_id = cursor.lastrowid
@@ -218,7 +223,8 @@ def list_tasks(status_filter: str = '', search: str = '', task_type: str = '') -
         sql = """
             SELECT t.id, t.name, t.description, t.start_time, t.end_time, t.status, t.created_at,
                    COALESCE(t.task_type, 'survey') as task_type,
-                   (SELECT COUNT(*) FROM task_cases WHERE task_id = t.id) as case_count
+                   (SELECT COUNT(*) FROM task_cases WHERE task_id = t.id) as case_count,
+                   t.sort_order
             FROM tasks t WHERE 1=1
         """
         params = {}
@@ -236,7 +242,7 @@ def list_tasks(status_filter: str = '', search: str = '', task_type: str = '') -
             params['search'] = f'%{search}%'
             params['search2'] = f'%{search}%'
 
-        sql += " ORDER BY t.created_at DESC"
+        sql += " ORDER BY t.sort_order ASC, t.id ASC"
 
         cursor.execute(sql, params)
         tasks = []
@@ -251,7 +257,7 @@ def list_tasks(status_filter: str = '', search: str = '', task_type: str = '') -
 
 def get_active_tasks_for_student(student_id: int) -> list:
     """
-    获取学生当前所有进行中任务（按开始时间升序）
+    获取学生当前所有进行中任务（按管理员设置的顺序返回）
     返回 status='active' 且未到截止时间的全部任务，排除背景资料问卷
     """
     auto_update_task_statuses()
@@ -267,7 +273,7 @@ def get_active_tasks_for_student(student_id: int) -> list:
             WHERE t.status = 'active'
               AND t.end_time >= :now
               AND COALESCE(t.task_type, 'survey') != 'background'
-            ORDER BY t.start_time ASC
+            ORDER BY t.sort_order ASC, t.id ASC
         """, {'now': now})
 
         rows = cursor.fetchall()
@@ -366,3 +372,95 @@ def set_task_background(task_id: int, is_background: bool = True) -> dict:
             cursor.execute("UPDATE tasks SET task_type = 'survey' WHERE id = :tid", {'tid': task_id})
             conn.commit()
             return {'success': True, 'message': f'已取消「{trow[1]}」的背景资料标记'}
+
+
+def _get_sorted_task_ids(cursor) -> list:
+    """按管理员设置的顺序返回全部任务 (id, sort_order) 列表"""
+    cursor.execute("""
+        SELECT id, sort_order FROM tasks
+        ORDER BY sort_order ASC, id ASC
+    """)
+    return cursor.fetchall()
+
+
+def move_task_up(task_id: int) -> dict:
+    """将任务在管理员顺序中上移一位（与前一任务交换排序值）"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ordered = _get_sorted_task_ids(cursor)
+        ids = [r[0] for r in ordered]
+        if task_id not in ids:
+            return {'success': False, 'message': '任务不存在'}
+        idx = ids.index(task_id)
+        if idx == 0:
+            return {'success': False, 'message': '已是第一个任务，无法上移'}
+        prev_id, prev_order = ordered[idx - 1]
+        cur_order = ordered[idx][1]
+        cursor.execute("UPDATE tasks SET sort_order = :so WHERE id = :tid",
+                       {'so': prev_order, 'tid': task_id})
+        cursor.execute("UPDATE tasks SET sort_order = :so WHERE id = :tid",
+                       {'so': cur_order, 'tid': prev_id})
+        conn.commit()
+        return {'success': True, 'message': '任务顺序已上移'}
+
+
+def move_task_down(task_id: int) -> dict:
+    """将任务在管理员顺序中下移一位（与后一任务交换排序值）"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ordered = _get_sorted_task_ids(cursor)
+        ids = [r[0] for r in ordered]
+        if task_id not in ids:
+            return {'success': False, 'message': '任务不存在'}
+        idx = ids.index(task_id)
+        if idx == len(ids) - 1:
+            return {'success': False, 'message': '已是最后一个任务，无法下移'}
+        next_id, next_order = ordered[idx + 1]
+        cur_order = ordered[idx][1]
+        cursor.execute("UPDATE tasks SET sort_order = :so WHERE id = :tid",
+                       {'so': next_order, 'tid': task_id})
+        cursor.execute("UPDATE tasks SET sort_order = :so WHERE id = :tid",
+                       {'so': cur_order, 'tid': next_id})
+        conn.commit()
+        return {'success': True, 'message': '任务顺序已下移'}
+
+
+def reopen_task(task_id: int) -> dict:
+    """将已关闭的任务回退到草稿状态（closed → draft），便于重新编辑和发布"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM tasks WHERE id = :tid", {'tid': task_id})
+        row = cursor.fetchone()
+        if not row:
+            return {'success': False, 'message': '任务不存在'}
+        if row[0] != 'closed':
+            return {'success': False, 'message': '仅已关闭的任务可回退到草稿'}
+        cursor.execute("UPDATE tasks SET status = 'draft' WHERE id = :tid", {'tid': task_id})
+        conn.commit()
+        return {'success': True, 'message': '任务已回退到草稿状态，可重新编辑并发布'}
+
+
+def is_task_unlocked_for_student(task_id: int, student_id: int) -> bool:
+    """
+    顺序作答限制：判断学生当前是否可作答指定任务。
+    按管理员设置的顺序遍历进行中任务，若到达目标任务之前存在尚未全部提交的任务，则返回 False。
+    仅 ycs 账号豁免顺序限制，其余用户（含测试用户）均须按顺序作答。
+    """
+    # 仅 ycs 账号豁免顺序限制（便于完整测试）；任务仅暂存未提交时，后续任务一律锁定
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users WHERE id = :sid", {'sid': student_id})
+        row = cursor.fetchone()
+        if row and row[0] == 'ycs':
+            return True
+
+    tasks = get_active_tasks_for_student(student_id)
+    for task in tasks:
+        if task['id'] == task_id:
+            return True
+        all_submitted = all(
+            c.get('response_status') == 'submitted' for c in task['cases']
+        )
+        if not all_submitted:
+            return False
+    return False

@@ -3,8 +3,15 @@
 """
 
 import json
+import re
 from datetime import datetime
 from app.db import get_connection
+
+
+# 最少汉字校验豁免账号（ycs / test 不受 50 汉字限制）
+_EXEMPT_MIN_CHARS_USERNAMES = {'ycs', 'test'}
+# 开放性文本案例最少回答字数
+MIN_OPEN_TEXT_CHARS = 50
 
 
 def save_draft(task_id: int, case_id: int, student_id: int, answers: dict) -> dict:
@@ -91,9 +98,22 @@ def submit_response(task_id: int, case_id: int, student_id: int, answers: dict,
             if task_row[2] != 'active' or now < start_time or now > end_time:
                 return {'success': False, 'message': '当前不在任务有效期内，无法提交'}
 
-        # 3. 完整性校验 - 所有题目必须作答
+        # 3. 完整性校验 - 必答题必须作答（非必答题可跳过）
+        required_ids = set()
+        if all_question_ids:
+            placeholders = ', '.join(f':q{i}' for i in range(len(all_question_ids)))
+            cursor.execute(
+                f"SELECT id, is_required FROM case_questions WHERE id IN ({placeholders})",
+                {f'q{i}': qid for i, qid in enumerate(all_question_ids)},
+            )
+            for r in cursor.fetchall():
+                if r[1]:
+                    required_ids.add(r[0])
+
         unanswered = []
         for qid in all_question_ids:
+            if qid not in required_ids:
+                continue
             ans = answers.get(str(qid)) or answers.get(qid)
             if ans is None or ans == '' or ans == []:
                 unanswered.append(qid)
@@ -101,9 +121,21 @@ def submit_response(task_id: int, case_id: int, student_id: int, answers: dict,
         if unanswered:
             return {
                 'success': False,
-                'message': f'还有 {len(unanswered)} 道题未作答，请完成所有题目后再提交',
+                'message': f'还有 {len(unanswered)} 道必答题未作答，请完成所有必答题后再提交',
                 'unanswered': unanswered
             }
+
+        # 3.5 开放性文本案例逐题最少汉字校验（ycs / test 账号豁免；背景资料任务不适用）
+        if (not is_background
+                and _is_open_text_only_case(cursor, case_id)
+                and not _is_exempt_min_chars_student(cursor, student_id)):
+            short_answers = _find_short_open_answers(cursor, answers)
+            if short_answers:
+                lines = '；'.join(f'「{qtext[:30]}」当前 {chars} 个汉字' for _, qtext, chars in short_answers[:5])
+                return {
+                    'success': False,
+                    'message': f'本案例为开放性文本作答，每道题回答不能少于 {MIN_OPEN_TEXT_CHARS} 个汉字：{lines}'
+                }
 
         # 4. 写入或更新
         if row:
@@ -334,3 +366,58 @@ def is_background_completed(task_id: int, student_id: int) -> bool:
         submitted = cursor.fetchone()[0]
 
         return submitted >= total
+
+
+def _count_chinese_chars(value) -> int:
+    """统计答案中的汉字数量（兼容字符串 / 列表 / 字典结构）"""
+    text = ''
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        text = value.get('open_text') or ''
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict) and item.get('open_text'):
+                parts.append(str(item['open_text']))
+            elif isinstance(item, str):
+                parts.append(item)
+        text = ''.join(parts)
+    if not isinstance(text, str):
+        text = str(text)
+    return len(re.findall(r'[\u4e00-\u9fff]', text))
+
+
+def _find_short_open_answers(cursor, answers: dict) -> list:
+    """找出汉字数不足 MIN_OPEN_TEXT_CHARS 的必答题目，返回 [(question_id, question_text, chars)]"""
+    short = []
+    for qid, ans in answers.items():
+        cursor.execute("SELECT question_text, is_required FROM case_questions WHERE id = :qid", {'qid': qid})
+        row = cursor.fetchone()
+        if not row or not row[1]:
+            continue  # 题目不存在或非必答，跳过
+        chars = _count_chinese_chars(ans)
+        if chars < MIN_OPEN_TEXT_CHARS:
+            short.append((qid, row[0], chars))
+    return short
+
+
+def _is_open_text_only_case(cursor, case_id: int) -> bool:
+    """判断案例是否只包含开放性文本题目（open）"""
+    cursor.execute("SELECT COUNT(*) FROM case_questions WHERE case_id = :cid", {'cid': case_id})
+    total = cursor.fetchone()[0]
+    if total == 0:
+        return False
+    cursor.execute(
+        "SELECT COUNT(*) FROM case_questions WHERE case_id = :cid AND question_type = 'open'",
+        {'cid': case_id}
+    )
+    open_count = cursor.fetchone()[0]
+    return open_count == total
+
+
+def _is_exempt_min_chars_student(cursor, student_id: int) -> bool:
+    """判断学生是否豁免最少字数限制（ycs / test）"""
+    cursor.execute("SELECT username FROM users WHERE id = :sid", {'sid': student_id})
+    row = cursor.fetchone()
+    return bool(row) and row[0] in _EXEMPT_MIN_CHARS_USERNAMES

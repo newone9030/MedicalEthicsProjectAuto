@@ -145,7 +145,9 @@ def _confirm_delete(case: dict, page: ft.Page, on_refresh):
         try:
             result = delete_case(case['id'])
         except Exception as ex:
-            page.overlay.remove(dlg)
+            # 先关闭对话框再显示提示（不能 remove 正在显示的模态框，客户端不会消失）
+            dlg.open = False
+            page.update()
             snack = ft.SnackBar(ft.Text(f'删除失败: {ex}'), bgcolor='#FF5252')
             page.overlay.append(snack)
             snack.open = True
@@ -180,9 +182,7 @@ def _confirm_delete(case: dict, page: ft.Page, on_refresh):
         ],
         modal=True,
     )
-    page.overlay.append(dlg)
-    dlg.open = True
-    page.update()
+    page.show_dialog(dlg)
 
 
 def build_case_editor_view(page: ft.Page, case_id: int = None, on_back=None) -> list:
@@ -1274,9 +1274,7 @@ def _on_exclusive_click(e, question_id: int, option_idx: int, temp_questions=Non
         ft.TextButton(content='取消', on_click=lambda e2: close_dlg()),
         ft.ElevatedButton(content='确定', on_click=confirm),
     ]
-    page.overlay.append(dlg)
-    dlg.open = True
-    page.update()
+    page.show_dialog(dlg)
 
 
 def _delete_question_handler(question_id: int, is_new: bool, on_refresh, temp_questions=None):

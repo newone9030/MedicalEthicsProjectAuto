@@ -97,7 +97,9 @@ CREATE TABLE case_questions (
     sort_order          NUMBER DEFAULT 0,
     open_text_enabled   NUMBER(1) DEFAULT 0,
     open_text_title     VARCHAR2(200),
-    open_text_hint      VARCHAR2(500)
+    open_text_hint      VARCHAR2(500),
+    section_title       VARCHAR2(200),
+    is_required         NUMBER(1) DEFAULT 1
 );
 
 COMMENT ON TABLE case_questions IS '案例题目表';
@@ -107,6 +109,8 @@ COMMENT ON COLUMN case_questions.hint IS '作答提示，管理员维护，可�
 COMMENT ON COLUMN case_questions.open_text_enabled IS '多选题是否启用开放式文本框: 0-否, 1-是（仅多选题有效，一道多选题仅一个）';
 COMMENT ON COLUMN case_questions.open_text_title IS '多选题开放式文本框的标题栏';
 COMMENT ON COLUMN case_questions.open_text_hint IS '多选题开放式文本框的录入提示';
+COMMENT ON COLUMN case_questions.section_title IS '分组标题（可选）';
+COMMENT ON COLUMN case_questions.is_required IS '是否必答: 1-必答, 0-非必答（可跳过）';
 
 CREATE SEQUENCE seq_case_questions START WITH 1 INCREMENT BY 1 NOCACHE;
 
@@ -131,6 +135,7 @@ CREATE TABLE tasks (
     end_time        TIMESTAMP NOT NULL,
     status          VARCHAR2(20) DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'active', 'closed')),
     task_type       VARCHAR2(20) DEFAULT 'survey' CHECK (task_type IN ('survey', 'background')),
+    sort_order      NUMBER DEFAULT 0,
     created_by      NUMBER NOT NULL REFERENCES users(id),
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -138,6 +143,7 @@ CREATE TABLE tasks (
 COMMENT ON TABLE tasks IS '调研任务表';
 COMMENT ON COLUMN tasks.status IS '任务状态: draft-草稿, published-已发布(待开始), active-进行中, closed-已关闭';
 COMMENT ON COLUMN tasks.task_type IS '任务类型: survey-普通调查, background-背景资料问卷';
+COMMENT ON COLUMN tasks.sort_order IS '任务顺序，管理员可调整，学生按顺序作答';
 
 CREATE SEQUENCE seq_tasks START WITH 1 INCREMENT BY 1 NOCACHE;
 

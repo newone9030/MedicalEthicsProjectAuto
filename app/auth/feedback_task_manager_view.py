@@ -126,9 +126,7 @@ def build_feedback_task_list_view(page: ft.Page, on_back, on_create_task) -> lis
             ],
             modal=True,
         )
-        page.overlay.append(choice_dlg)
-        choice_dlg.open = True
-        page.update()
+        page.show_dialog(choice_dlg)
 
     _populate_task_list()
 
@@ -173,9 +171,7 @@ def _build_task_card(page, task, refresh_list, show_snack, on_create_task):
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
         def _exec_delete():
             dlg.open = False
@@ -460,9 +456,7 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     # ---- 添加题目对话框 ----
     def open_add_question_dlg(qtype):
@@ -512,9 +506,7 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     # ---- 添加关联调查题对话框 ----
     def open_add_mapping_dlg(e):
@@ -567,9 +559,7 @@ def build_feedback_task_editor(page: ft.Page, page_category: str, task_id: int =
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     # 初始构建
     _populate_editor_content()
@@ -697,9 +687,7 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     def _exec_edit_question():
         """编辑题目对话框（内容 + 类型）"""
@@ -764,9 +752,7 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     def _exec_delete_question(qid):
         dlg = ft.AlertDialog(
@@ -780,9 +766,7 @@ def _build_question_card(page, q, task_id, show_snack, refresh_content,
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
         def _do_delete():
             dlg.open = False

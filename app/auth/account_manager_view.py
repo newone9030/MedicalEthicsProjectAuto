@@ -287,9 +287,7 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
         print(">>> 对话框已打开，open=", dlg.open)
 
     # ---- 重置密码对话框 ----
@@ -338,9 +336,7 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     # ---- 删除确认对话框 ----
     def open_delete_dlg(sid, uname):
@@ -372,9 +368,7 @@ def build_account_manager_view(page: ft.Page, on_back) -> list:
             ],
             modal=True,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     # ---- 切换启用/禁用状态 ----
     def toggle_status(sid):

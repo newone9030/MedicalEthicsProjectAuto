@@ -15,6 +15,9 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
     user = page.session.store.get('user')
     student_id = user['id']
 
+    # 记录构建时的视图代际：页面切换后旧视图的延迟刷新调度应立即停止
+    _view_gen = page.session.store.get('_view_generation') or 0
+
     task_container = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO)
 
     def refresh_task():
@@ -42,26 +45,36 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
 
         # ---- 背景资料卡片（无论是否完成都显示入口） ----
         bg_task = get_background_task()
+        bg_completed = True
         if bg_task:
+            bg_completed = is_background_completed(bg_task['id'], student_id)
             task_container.controls.append(
                 _build_background_survey_card(bg_task, student_id, page, refresh_task)
             )
             task_container.controls.append(ft.Divider(height=15, color='transparent'))
 
+        # 顺序作答限制：仅 ycs 账号豁免，其余用户（含测试用户）须按顺序作答
+        is_exempt_user = (user.get('username') == 'ycs')
+
         if not tasks:
             _build_empty_state(task_container)
         else:
-            # 展示所有进行中的任务
+            # 展示所有进行中的任务（按管理员设置顺序）
+            # 顺序作答限制：前一个任务未全部提交（仅暂存）时，后续任务锁定（仅 ycs 豁免）
+            prev_all_submitted = True
             for task in tasks:
                 statuses = get_submission_status(task['id'], student_id)
                 all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
+                locked = (not prev_all_submitted) and not is_exempt_user
                 task_container.controls.append(
-                    _build_task_card(task, statuses, page, on_enter_task, all_submitted, student_id, refresh_task)
+                    _build_task_card(task, statuses, page, on_enter_task, all_submitted, student_id,
+                                     refresh_task, bg_completed=bg_completed, locked=locked)
                 )
                 task_container.controls.append(ft.Divider(height=15, color='transparent'))
+                prev_all_submitted = prev_all_submitted and all_submitted
 
             # 历史任务（已关闭的）
-            _add_history_tasks(task_container, student_id, page, on_enter_task)
+            _add_history_tasks(task_container, student_id, page, on_enter_task, bg_completed=bg_completed)
 
         # 测试用户反馈入口（无论活跃任务是否存在，检查条件）
         _maybe_add_feedback_entry(task_container, page, student_id, user, tasks, bg_task,
@@ -71,11 +84,28 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
             task_container.update()
 
     # 控件挂载后再加载数据（页面控件加载完成前不调用任何方法）
-    def _schedule_refresh():
-        if task_container.parent is None:
-            threading.Timer(0.05, _schedule_refresh).start()
+    def _schedule_refresh(retry: int = 0):
+        # 页面已切换（代际变化），旧视图调度立即停止，避免操作已移除控件
+        if (page.session.store.get('_view_generation') or 0) != _view_gen:
+            print('[dashboard] 视图已切换，放弃刷新调度')
             return
-        refresh_task()
+        if task_container.parent is None:
+            # 限制最大重试次数，防止视图切换时无限递归创建线程导致卡死
+            if retry >= 100:
+                print('[dashboard] task_container 长时间未挂载，放弃调度')
+                return
+            threading.Timer(0.05, _schedule_refresh, args=[retry + 1]).start()
+            return
+
+        # 通过 page.run_task 在 Flet 事件循环中执行刷新，避免在 Timer 线程
+        # 中直接操作控件与更新页面
+        async def _async_refresh():
+            if (page.session.store.get('_view_generation') or 0) != _view_gen:
+                print('[dashboard] 刷新执行时视图已切换，放弃')
+                return
+            refresh_task()
+
+        page.run_task(_async_refresh)
 
     _schedule_refresh()
 
@@ -111,18 +141,60 @@ def _build_empty_state(container: ft.Column):
     )
 
 
-def _close_overlay_dlg(dialog):
-    """关闭并移除 overlay 中的对话框"""
-    if dialog.page:
-        dialog.open = False
-        ##dialog.page.overlay.remove(dialog)
-        
-        dialog.page.update()
+def _close_overlay_dlg(dialog, page):
+    """关闭对话框（Flet 0.86.5 官方方式：只 open=False + update）。
+    注意不能发 remove 命令——show_dialog 已包装 on_dismiss，客户端确认
+    关闭后会自动把对话框移出对话框栈，手动 remove 反而会导致正在显示的
+    模态框不消失或关闭回调丢失。"""
+    dialog.open = False
+    page.update()
+
+
+def _cleanup_stale_overlay(page: ft.Page, keep=None):
+    """清理对话框栈中已关闭的旧对话框（open=False），避免无限累积导致卡顿。
+    keep：需要保留的对话框（当前正要打开的）。"""
+    dialogs = getattr(page, '_dialogs', None)
+    if dialogs is None:
+        return
+    for c in [c for c in dialogs.controls
+              if isinstance(c, ft.AlertDialog) and c is not keep and not c.open]:
+        try:
+            page._remove_dialog(c)
+        except Exception:
+            pass
+
+
+def _open_overlay_dlg(page: ft.Page, dlg):
+    """打开对话框（Flet 0.86.5 官方 API）：先清理旧对话框（防累积），
+    再 page.show_dialog 挂载（自动包装 on_dismiss，关闭后自动出栈）。"""
+    _cleanup_stale_overlay(page, keep=dlg)
+    dialogs = getattr(page, '_dialogs', None)
+    if dialogs is not None and dlg in dialogs.controls:
+        if dlg.open:
+            return  # 已在显示中，忽略重复触发
+        try:
+            page._remove_dialog(dlg)
+        except Exception:
+            pass
+    try:
+        page.show_dialog(dlg)
+    except RuntimeError:
+        pass
+
+
+def _clean_overlay_snacks(page: ft.Page):
+    """清理 overlay 中已显示完的 SnackBar，避免无限累积"""
+    for s in [s for s in page.overlay if isinstance(s, ft.SnackBar)]:
+        try:
+            page.overlay.remove(s)
+        except ValueError:
+            pass
 
 
 def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
                      all_submitted: bool = False, student_id: int = None,
-                     on_refresh=None) -> ft.Container:
+                     on_refresh=None, bg_completed: bool = True,
+                     locked: bool = False) -> ft.Container:
     """构建进行中任务卡片"""
     now = datetime.now()
     end_time = task.get('end_time')
@@ -190,15 +262,14 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
     # ---- 底部按钮区（根据是否全部已提交决定） ----
     if all_submitted:
         def show_restart_confirm(e):
-            page.overlay.append(confirm_dlg)
-            confirm_dlg.open = True
-            page.update()
+            _open_overlay_dlg(page, confirm_dlg)
 
         def do_restart(e2):
             """确认重新作答"""
-            _close_overlay_dlg(confirm_dlg)
+            _close_overlay_dlg(confirm_dlg, page)
             result = delete_student_responses(task['id'], student_id)
             if result['success']:
+                _clean_overlay_snacks(page)
                 snack = ft.SnackBar(ft.Text(result['message']), bgcolor='#4CAF50')
                 page.overlay.append(snack)
                 snack.open = True
@@ -206,6 +277,7 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
                 if on_refresh:
                     on_refresh()
             else:
+                _clean_overlay_snacks(page)
                 snack = ft.SnackBar(ft.Text(result['message']), bgcolor='#FF5252')
                 page.overlay.append(snack)
                 snack.open = True
@@ -215,7 +287,7 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
             title=ft.Text('确认重新作答'),
             content=ft.Text('删除作答后，之前填写的所有内容将丢失。\n\n确定要重新作答吗？'),
             actions=[
-                ft.TextButton(content='取消', on_click=lambda e: _close_overlay_dlg(confirm_dlg)),
+                ft.TextButton(content='取消', on_click=lambda e: _close_overlay_dlg(confirm_dlg, page)),
                 ft.ElevatedButton(content='确认删除', on_click=do_restart,
                                   style=ft.ButtonStyle(bgcolor='#FF5252', color='white')),
             ],
@@ -227,20 +299,21 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
                 content='查看作答',
                 icon=ft.Icons.VISIBILITY,
                 on_click=lambda e: on_enter_task(task['id'], page, readonly=True),
+                disabled=not bg_completed or locked,
                 style=ft.ButtonStyle(
-                    bgcolor='#1565C0', color='white',
+                    bgcolor='#1565C0' if (bg_completed and not locked) else '#BDBDBD', color='white',
                     shape=ft.RoundedRectangleBorder(radius=8),
                 ),
             ),
             ft.OutlinedButton(
                 content='重新作答',
                 icon=ft.Icons.REFRESH,
-                on_click=show_restart_confirm if not is_closed else None,
-                disabled=is_closed,
+                on_click=show_restart_confirm if (not is_closed and bg_completed and not locked) else None,
+                disabled=is_closed or not bg_completed or locked,
                 style=ft.ButtonStyle(
-                    color='#FF5252' if not is_closed else '#BDBDBD',
+                    color='#FF5252' if (not is_closed and bg_completed and not locked) else '#BDBDBD',
                     shape=ft.RoundedRectangleBorder(radius=8),
-                    side=ft.BorderSide(color='#FF5252' if not is_closed else '#BDBDBD', width=1),
+                    side=ft.BorderSide(color='#FF5252' if (not is_closed and bg_completed and not locked) else '#BDBDBD', width=1),
                 ),
             ),
         ], spacing=10)
@@ -248,14 +321,47 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
         action_buttons = ft.ElevatedButton(
             content='进入作答' if not is_closed else '已关闭',
             icon=ft.Icons.PLAY_ARROW if not is_closed else ft.Icons.LOCK,
-            on_click=lambda e: on_enter_task(task['id'], page) if not is_closed else None,
-            disabled=is_closed,
+            on_click=lambda e: on_enter_task(task['id'], page) if (not is_closed and not locked) else None,
+            disabled=is_closed or not bg_completed or locked,
             style=ft.ButtonStyle(
-                bgcolor='#1976D2' if not is_closed else '#BDBDBD',
+                bgcolor='#1976D2' if (not is_closed and bg_completed and not locked) else '#BDBDBD',
                 color='white',
                 shape=ft.RoundedRectangleBorder(radius=8),
                 padding=ft.Padding(30, 12, 30, 12),
             ),
+        )
+
+    # 背景资料未完成或前置任务未完成时，显示提示并禁止作答
+    warning_items = []
+    if not bg_completed:
+        warning_items.append(
+            ft.Divider(height=10, color='transparent'),
+        )
+        warning_items.append(
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.INFO_OUTLINE, color='#FF9800', size=18),
+                    ft.Text('请先完成上方"背景资料调查"后再进入作答', size=13, color='#E65100'),
+                ], spacing=6),
+                bgcolor='#FFF8E1',
+                border_radius=8,
+                padding=ft.Padding(10, 8, 10, 8),
+            )
+        )
+    if locked:
+        warning_items.append(
+            ft.Divider(height=10, color='transparent'),
+        )
+        warning_items.append(
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.LOCK_OUTLINE, color='#FF9800', size=18),
+                    ft.Text('请先完成前面的任务，再按顺序作答本任务', size=13, color='#E65100'),
+                ], spacing=6),
+                bgcolor='#FFF8E1',
+                border_radius=8,
+                padding=ft.Padding(10, 8, 10, 8),
+            )
         )
 
     # ---- 状态徽章 ----
@@ -303,6 +409,8 @@ def _build_task_card(task: dict, statuses: dict, page: ft.Page, on_enter_task,
             ft.Divider(height=8, color='transparent'),
             ft.Row(case_chips, spacing=6, wrap=True),
             ft.Divider(height=12, color='transparent'),
+            *warning_items,
+            ft.Divider(height=12, color='transparent'),
             action_buttons,
         ], spacing=0),
         bgcolor='white',
@@ -324,18 +432,17 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
         page.go('/student/background')
 
     def show_restart_confirm(e):
-        page.overlay.append(confirm_dlg)
-        confirm_dlg.open = True
-        page.update()
+        _open_overlay_dlg(page, confirm_dlg)
 
     def do_restart(e2):
-        _close_overlay_dlg(confirm_dlg)
+        _close_overlay_dlg(confirm_dlg, page)
         result = delete_background_survey_responses(bg_task['id'], student_id)
         if result['success']:
             # 清除 session 中的背景资料完成标记
             page.session.store.set('background_completed', False)
             page.go('/student/background')
         else:
+            _clean_overlay_snacks(page)
             snack = ft.SnackBar(ft.Text(result['message']), bgcolor='#FF5252')
             page.overlay.append(snack)
             snack.open = True
@@ -345,7 +452,7 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
         title=ft.Text('确认重新填写背景资料'),
         content=ft.Text('删除背景资料作答后，之前填写的所有内容将丢失。\n\n确定要重新填写吗？'),
         actions=[
-            ft.TextButton(content='取消', on_click=lambda e: _close_overlay_dlg(confirm_dlg)),
+            ft.TextButton(content='取消', on_click=lambda e: _close_overlay_dlg(confirm_dlg, page)),
             ft.ElevatedButton(content='确认删除', on_click=do_restart,
                               style=ft.ButtonStyle(bgcolor='#FF5252', color='white')),
         ],
@@ -426,7 +533,8 @@ def _build_background_survey_card(bg_task: dict, student_id: int, page: ft.Page,
     )
 
 
-def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_enter_task):
+def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_enter_task,
+                       bg_completed: bool = True):
     """添加历史任务（可折叠）"""
     from app.db import get_connection
     from datetime import datetime
@@ -483,8 +591,11 @@ def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_
                         ft.Text(t['name'], size=15, weight=ft.FontWeight.W_500, color='#757575'),
                         ft.Text(f'截止: {end_str} | 已提交 {submitted}/{len(statuses)} 个案例', size=13, color='#BDBDBD'),
                     ], spacing=2, expand=True),
-                    ft.TextButton(content='查看', on_click=lambda e, tid=t['id']: on_enter_task(tid, page, readonly=True),
-                                  style=ft.ButtonStyle(color='#1565C0')),
+                    ft.TextButton(content='查看',
+                                  on_click=(lambda e, tid=t['id']: on_enter_task(tid, page, readonly=True))
+                                  if bg_completed else None,
+                                  disabled=not bg_completed,
+                                  style=ft.ButtonStyle(color='#1565C0' if bg_completed else '#BDBDBD')),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor='#FAFAFA', border_radius=8, padding=ft.Padding(12, 8, 12, 8),
             )
@@ -588,14 +699,11 @@ def _build_feedback_view_card(page: ft.Page, student_id: int,
 
     def on_view_feedback(e):
         dlg = _build_feedback_view_dialog(page, student_id)
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_overlay_dlg(page, dlg)
 
     def on_delete_feedback(e):
         def do_delete(ev):
-            dlg.open = False
-            page.update()
+            _close_overlay_dlg(dlg, page)
             try:
                 delete_student_feedback(student_id)
                 snack = ft.SnackBar(ft.Text('反馈已删除，可重新填写', color='white'),
@@ -603,6 +711,7 @@ def _build_feedback_view_card(page: ft.Page, student_id: int,
             except Exception as ex:
                 snack = ft.SnackBar(ft.Text(f'删除失败: {ex}', color='white'),
                                     bgcolor='#E53935')
+            _clean_overlay_snacks(page)
             page.overlay.append(snack)
             snack.open = True
             page.update()
@@ -610,8 +719,7 @@ def _build_feedback_view_card(page: ft.Page, student_id: int,
                 refresh_cb()
 
         def cancel_delete(ev):
-            dlg.open = False
-            page.update()
+            _close_overlay_dlg(dlg, page)
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -629,9 +737,7 @@ def _build_feedback_view_card(page: ft.Page, student_id: int,
                 ),
             ],
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        _open_overlay_dlg(page, dlg)
 
     return ft.Container(
         content=ft.Column([
@@ -697,8 +803,7 @@ def _build_feedback_view_dialog(page: ft.Page, student_id: int) -> ft.AlertDialo
     items = get_student_feedback(student_id)
 
     def close_dlg(e):
-        dlg.open = False
-        page.update()
+        _close_overlay_dlg(dlg, page)
 
     if not items:
         body = ft.Container(

@@ -8,7 +8,8 @@ from app.config import TASK_STATUS, THEME_OPTIONS
 from app.db import test_connection, close_db
 from app.auth import login_view
 from app.case.case_service import get_case_count
-from app.task.task_service import get_background_task, get_task, get_active_task_for_student
+from app.task.task_service import (get_background_task, get_task,
+                                    get_active_task_for_student, get_active_tasks_for_student)
 from app.response.response_service import is_background_completed, get_submission_status
 from app.student.background_survey_view import build_background_survey_view
 from app.case.case_manager_view import build_case_list_view, build_case_editor_view
@@ -510,10 +511,15 @@ def _build_consent_page(page: ft.Page) -> ft.View:
     def on_logout(e):
         _logout(page)
 
-    consent_checkbox = ft.Checkbox(
+    consent_checkbox_control = ft.Checkbox(
         label='我已阅读上述说明，并愿意继续进入本研究系统',
         value=False,
         fill_color='#1976D2',
+    )
+    consent_checkbox = ft.Container(
+        content=consent_checkbox_control,
+        # 整体向左移动两个中文字符宽度
+        margin=ft.Margin(-32, 0, 0, 0),
     )
 
     continue_btn = ft.ElevatedButton(
@@ -527,7 +533,7 @@ def _build_consent_page(page: ft.Page) -> ft.View:
     )
 
     def on_continue(e):
-        if not consent_checkbox.value:
+        if not consent_checkbox_control.value:
             snack = ft.SnackBar(
                 ft.Text('请先勾选"我已阅读上述说明"后再继续进入'),
                 bgcolor='#FF5252',
@@ -667,13 +673,15 @@ def _test_user_requires_feedback(page: ft.Page) -> bool:
     bg_task = get_background_task()
     if bg_task and not is_background_completed(bg_task['id'], student_id):
         return False
-    task = get_active_task_for_student(student_id)
-    if not task:
+    tasks = get_active_tasks_for_student(student_id)
+    if not tasks:
         # 无活跃任务（任务已关闭/尚未发布）：反馈页无法加载，不强制
         return False
-    statuses = get_submission_status(task['id'], student_id)
-    all_submitted = statuses and all(s == 'submitted' for s in statuses.values())
-    return all_submitted
+    for task in tasks:
+        statuses = get_submission_status(task['id'], student_id)
+        if not statuses or not all(s == 'submitted' for s in statuses.values()):
+            return False
+    return True
 
 
 def _show_feedback_required_dialog(page: ft.Page):
@@ -702,9 +710,7 @@ def _show_feedback_required_dialog(page: ft.Page):
                               style=ft.ButtonStyle(bgcolor='#FF9800', color='white')),
         ],
     )
-    page.overlay.append(dlg)
-    dlg.open = True
-    page.update()
+    page.show_dialog(dlg)
 
 
 def _build_student_page(page: ft.Page) -> ft.View:
@@ -845,9 +851,63 @@ def _build_student_feedback_page(page: ft.Page) -> ft.View:
     user = page.session.store.get('user') or {}
     student_id = user.get('id')
 
+    # 仅测试用户可填写反馈任务
+    if user.get('user_type') != 'test':
+        return ft.View(
+            route='/student/feedback',
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.LOCK_OUTLINE, size=64, color='#FF5252'),
+                        ft.Text('无权访问', size=18, weight=ft.FontWeight.W_500, color='#757575'),
+                        ft.Text('反馈任务仅对测试用户开放', size=14, color='#BDBDBD'),
+                        ft.ElevatedButton(
+                            content='返回仪表盘',
+                            on_click=lambda e: _navigate(page, 'dashboard'),
+                            icon=ft.Icons.ARROW_BACK,
+                        ),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12),
+                    padding=60,
+                ),
+            ],
+            bgcolor='#F5F7FA',
+        )
+
+    # 测试用户必须完成所有已开放任务后才能填写反馈
+    tasks = get_active_tasks_for_student(student_id)
+    unfinished = []
+    for task in tasks:
+        statuses = get_submission_status(task['id'], student_id)
+        if not statuses or not all(s == 'submitted' for s in statuses.values()):
+            unfinished.append(task['name'])
+    if unfinished:
+        return ft.View(
+            route='/student/feedback',
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.PENDING_ACTIONS, size=64, color='#FF9800'),
+                        ft.Text('请先完成所有任务', size=18, weight=ft.FontWeight.W_500, color='#E65100'),
+                        ft.Text('反馈任务需在完成所有已开放任务后才能填写。\n'
+                                f'尚未完成：{"、".join(unfinished[:3])}'
+                                + (' 等' if len(unfinished) > 3 else ''),
+                                size=14, color='#757575', text_align=ft.TextAlign.CENTER),
+                        ft.ElevatedButton(
+                            content='返回仪表盘',
+                            on_click=lambda e: _navigate(page, 'dashboard'),
+                            icon=ft.Icons.ARROW_BACK,
+                        ),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12),
+                    padding=60,
+                ),
+            ],
+            bgcolor='#F5F7FA',
+        )
+
     # 获取当前活跃任务（用于查找已回答题目）
     from app.task.task_service import get_active_task_for_student
-    from app.response.response_service import get_submission_status
 
     active_task = get_active_task_for_student(student_id)
 
@@ -958,6 +1018,10 @@ def main(page: ft.Page):
         # 学生已同意但未完成背景资料 → 提示先完成背景资料（不再强制跳转，
         # 改为在 dashboard 上通过背景资料卡片引导填写）
 
+        # 视图代际递增：旧视图的延迟加载/刷新调度检测到代际变化后立即停止，
+        # 避免页面切换后旧 Timer 继续操作已移除的控件导致界面卡死
+        page.session.store.set('_view_generation', (page.session.store.get('_view_generation') or 0) + 1)
+
         page.views.clear()
         try:
             view = _build_view(route, page)
@@ -1007,6 +1071,6 @@ mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
 DB_PATH = os.path.join(mount_path, "survey.db")
 
 if __name__ == '__main__':
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
-         , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
-     ##ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
+     ##    , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
+     ft.app(target=main, view=ft.AppView.WEB_BROWSER)

@@ -3,6 +3,8 @@
 9 步反馈流程：引导页 → 说明页 → N 道案例评价页 → 4 个固定类别页 → 确认提交 → 感谢页
 """
 
+import asyncio
+
 import flet as ft
 from app.student.feedback_service import (
     get_student_answered_questions,
@@ -500,8 +502,12 @@ def build_feedback_view(page: ft.Page, student_id: int, task_id: int,
                 _ctrl.update()
 
         # 跳转后滚动到页面最顶端，避免题目漏填
-        if main_col.page is not None:
-            page.run_task(_scroll_to_top)
+        # （main_col.page 在控件脱离树时访问会抛异常，此处兜底）
+        try:
+            if main_col.page is not None:
+                page.run_task(_scroll_to_top)
+        except Exception:
+            pass
 
     def _go_to_step(step_idx):
         """先收集当前页作答，再跳转"""
@@ -509,10 +515,17 @@ def build_feedback_view(page: ft.Page, student_id: int, task_id: int,
         render_step(step_idx)
 
     async def _scroll_to_top():
-        """滚动到页面最顶端（外层 + 内层滚动容器同时回顶）"""
+        """滚动到页面最顶端（外层 + 内层滚动容器同时回顶）。
+
+        scroll_to 是发往客户端的命令（与 update 串行处理）。若新页面内容还没在
+        客户端完成渲染与布局就发送滚动命令，滚动会失效（内容换新但滚动位置残留
+        在底部）。因此先短暂等待客户端渲染完成，再发送滚动命令；并加超时，
+        避免客户端无响应时协程无限挂起。
+        """
+        await asyncio.sleep(0.15)  # 等待客户端完成新页面的渲染与布局
         for ctrl in (main_col, content_area):
             try:
-                await ctrl.scroll_to(offset=0)
+                await asyncio.wait_for(ctrl.scroll_to(offset=0), timeout=2.0)
             except Exception:
                 pass
 

@@ -7,7 +7,8 @@ import threading
 import flet as ft
 from app.task.task_service import (
     create_task, update_task, get_task, list_tasks,
-    publish_task, close_task, delete_task, set_task_background
+    publish_task, close_task, delete_task, set_task_background,
+    move_task_up, move_task_down, reopen_task,
 )
 from app.case.case_service import list_cases
 from app.response.response_service import (
@@ -64,8 +65,8 @@ def build_task_list_view(page: ft.Page, on_create, on_edit) -> ft.Column:
                 )
             )
         else:
-            for t in tasks:
-                task_list.controls.append(_build_task_card(t, page, on_edit, refresh_list))
+            for idx, t in enumerate(tasks):
+                task_list.controls.append(_build_task_card(t, page, on_edit, refresh_list, position=idx + 1))
 
         if task_list.page:
             task_list.update()
@@ -84,8 +85,8 @@ def build_task_list_view(page: ft.Page, on_create, on_edit) -> ft.Column:
             )
         )
     else:
-        for t in tasks:
-            task_list.controls.append(_build_task_card(t, page, on_edit, refresh_list))
+        for idx, t in enumerate(tasks):
+            task_list.controls.append(_build_task_card(t, page, on_edit, refresh_list, position=idx + 1))
 
     return ft.Column([
         ft.Row([
@@ -104,7 +105,7 @@ def build_task_list_view(page: ft.Page, on_create, on_edit) -> ft.Column:
     ], expand=True, spacing=0)
 
 
-def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Container:
+def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh, position: int = None) -> ft.Container:
     """构建任务卡片"""
     status_config = {
         'draft': ('草稿', '#9E9E9E'),
@@ -122,6 +123,10 @@ def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Conta
     menu_items = [
         ft.PopupMenuItem(content='编辑', icon=ft.Icons.EDIT,
                          on_click=lambda e, t=task: on_edit(t['id'], page)),
+        ft.PopupMenuItem(content='上移', icon=ft.Icons.ARROW_UPWARD,
+                         on_click=lambda e, t=task: _do_move(t, 'up', page, on_refresh)),
+        ft.PopupMenuItem(content='下移', icon=ft.Icons.ARROW_DOWNWARD,
+                         on_click=lambda e, t=task: _do_move(t, 'down', page, on_refresh)),
     ]
 
     # 非草稿任务可以管理作答
@@ -157,6 +162,10 @@ def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Conta
         )
     elif task['status'] == 'closed':
         menu_items.append(
+            ft.PopupMenuItem(content='回退到草稿', icon=ft.Icons.UNDO,
+                             on_click=lambda e, t=task: _do_reopen(t, page, on_refresh)),
+        )
+        menu_items.append(
             ft.PopupMenuItem(content='删除', icon=ft.Icons.DELETE,
                              on_click=lambda e, t=task: _do_delete(t, page, on_refresh)),
         )
@@ -187,7 +196,11 @@ def _build_task_card(task: dict, page: ft.Page, on_edit, on_refresh) -> ft.Conta
         content=ft.Row([
             ft.Column([
                 ft.Row(name_row_controls, spacing=8),
-                ft.Text(f'{task["case_count"]} 个案例 | {start_str} ~ {end_str}', size=12, color='#9E9E9E'),
+                ft.Text(
+                    f'第 {position} 个任务 | {task["case_count"]} 个案例 | {start_str} ~ {end_str}'
+                    if position else f'{task["case_count"]} 个案例 | {start_str} ~ {end_str}',
+                    size=12, color='#9E9E9E',
+                ),
             ], spacing=4, expand=True),
             ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, items=menu_items),
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -207,6 +220,20 @@ def _do_publish(task: dict, page: ft.Page, on_refresh):
 
 def _do_close(task: dict, page: ft.Page, on_refresh):
     result = close_task(task['id'])
+    _show_snack(page, result)
+    if result['success']:
+        on_refresh()
+
+
+def _do_move(task: dict, direction: str, page: ft.Page, on_refresh):
+    result = move_task_up(task['id']) if direction == 'up' else move_task_down(task['id'])
+    _show_snack(page, result)
+    if result['success']:
+        on_refresh()
+
+
+def _do_reopen(task: dict, page: ft.Page, on_refresh):
+    result = reopen_task(task['id'])
     _show_snack(page, result)
     if result['success']:
         on_refresh()
@@ -237,9 +264,7 @@ def _do_delete(task: dict, page: ft.Page, on_refresh):
         ],
         modal=True,
     )
-    page.overlay.append(dlg)
-    dlg.open = True
-    page.update()
+    page.show_dialog(dlg)
 
 
 def _show_snack(page: ft.Page, result: dict):
@@ -313,9 +338,7 @@ def _show_response_manager(task: dict, page: ft.Page, on_refresh):
             ],
             modal=True,
         )
-        page.overlay.append(confirm_dlg)
-        confirm_dlg.open = True
-        page.update()
+        page.show_dialog(confirm_dlg)
 
     clear_all_btn.on_click = clear_all
 
@@ -340,10 +363,8 @@ def _show_response_manager(task: dict, page: ft.Page, on_refresh):
         ],
         modal=True,
     )
-    # 对话框挂载到页面
-    page.overlay.append(dlg2)
-    dlg2.open = True
-    page.update()
+    # 对话框挂载到页面（官方 API，自动管理 on_dismiss 与出栈）
+    page.show_dialog(dlg2)
 
     # -- 第二步：所有控件已加载到页面后，再查询数据并填充列表 --
 
