@@ -344,9 +344,9 @@ def build_background_survey_view(
                             content=ft.Column([
                                 ft.Row([
                                     ft.Icon(ft.Icons.LIGHTBULB_OUTLINE, size=15, color='#FF8F00'),
-                                    ft.Text('作答提示', size=13, color='#FF8F00', weight=ft.FontWeight.W_600),
+                                    ft.Text('作答提示', size=17, color='#FF8F00', weight=ft.FontWeight.W_600),
                                 ], spacing=4),
-                                *[ft.Text(f'{i}. {line}', size=13, color='#FF8F00', italic=True,
+                                *[ft.Text(f'{i}. {line}', size=17, color='#FF8F00', italic=True,
                                            overflow=ft.TextOverflow.VISIBLE)
                                   for i, line in enumerate(hint_lines, 1)],
                             ], spacing=1),
@@ -439,7 +439,7 @@ def build_background_survey_view(
                     )
                 )
             header_row_controls.append(
-                ft.Text(qd['question_text'], size=15, weight=ft.FontWeight.W_500,
+                ft.Text(qd['question_text'], size=18, weight=ft.FontWeight.W_500,
                         expand=True, overflow=ft.TextOverflow.VISIBLE),
             )
             header_row_controls.append(qd['score_ctrl'])
