@@ -114,6 +114,25 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
         on_click=lambda e: on_back() if on_back else None,
     )
 
+    # 构建阶段同步预加载时：控件尚未挂载，直接调用 update() 会抛
+    # "Control must be added to the page first"。以下辅助函数在未挂载时
+    # 跳过更新，填充好的内容随 route_change 末尾的 page.update() 一次性渲染。
+    _sync_build = [False]
+
+    def _safe_update(ctrl):
+        try:
+            if ctrl.parent is not None:
+                ctrl.update()
+        except Exception:
+            pass
+
+    def _page_update():
+        if not _sync_build[0]:
+            try:
+                page.update()
+            except Exception:
+                pass
+
     # SnackBar 辅助
     def _show_snack(msg: str, success: bool = True):
         # 清理旧的 SnackBar，避免 overlay 控件无限累积导致页面越来越卡
@@ -165,12 +184,12 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
     # Phase 2: 数据加载（通过 page.run_task 延迟执行）
     # ================================================================
 
-    async def init_data():
-        """异步加载所有数据并更新 UI"""
+    def refresh_task():
+        """加载所有数据并更新 UI（同步函数，无 await）"""
         try:
             # 若页面已切换（代际变化），旧视图任务直接放弃，避免操作已移除控件
             if (page.session.store.get('_view_generation') or 0) != _view_gen:
-                print('[survey] init_data 执行时视图已切换，放弃加载')
+                print('[survey] refresh_task 执行时视图已切换，放弃加载')
                 return
             task = get_task(task_id)
             if not task:
@@ -189,7 +208,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 )
                 progress_text.value = '任务不存在'
                 case_label.value = ''
-                page.update()
+                _page_update()
                 return
 
             # ---- 背景资料未完成时禁止作答（只读查看不受限） ----
@@ -212,7 +231,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     )
                     progress_text.value = '背景资料未完成'
                     case_label.value = ''
-                    page.update()
+                    _page_update()
                     return
 
             # ---- 顺序作答限制：前置任务未全部提交时禁止作答（只读查看不受限） ----
@@ -233,11 +252,11 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 )
                 progress_text.value = '任务未解锁'
                 case_label.value = ''
-                page.update()
+                _page_update()
                 return
 
             task_title_text.value = task['name']
-            task_title_text.update()
+            _safe_update(task_title_text)
 
             cases = task['cases']
             if not cases:
@@ -256,7 +275,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 )
                 progress_text.value = '无关联案例'
                 case_label.value = ''
-                page.update()
+                _page_update()
                 return
 
             # ---- 加载所有案例的题目和答案 ----
@@ -302,7 +321,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 progress_text.value = '全部已提交'
                 progress_bar.value = 1.0
                 case_label.value = ''
-                page.update()
+                _page_update()
                 return
 
             # ---- 展平所有题目 ----
@@ -332,7 +351,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 )
                 progress_text.value = '暂无题目'
                 case_label.value = ''
-                page.update()
+                _page_update()
                 return
 
             # ---- 内部函数：进度统计 ----
@@ -346,8 +365,8 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 completed = count_completed()
                 progress_text.value = f'进度: {completed}/{total_q_count} 题已完成'
                 progress_bar.value = completed / total_q_count if total_q_count > 0 else 0
-                progress_text.update()
-                progress_bar.update()
+                _safe_update(progress_text)
+                _safe_update(progress_bar)
 
             # ---- 内部函数：获取案例序号 ----
             def _case_order(target_case, case_list):
@@ -370,10 +389,10 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                     next_btn.visible = not is_last
                     save_btn.visible = True
                     submit_all_btn.visible = is_last
-                prev_btn.update()
-                next_btn.update()
-                save_btn.update()
-                submit_all_btn.update()
+                _safe_update(prev_btn)
+                _safe_update(next_btn)
+                _safe_update(save_btn)
+                _safe_update(submit_all_btn)
 
             # ---- 构建当前题目显示 ----
             def build_question_content():
@@ -381,12 +400,12 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 num_in_task = current_idx[0] + 1
 
                 case_label.value = f'案例 {_case_order(case, active_cases)}/{len(active_cases)}: {case["title"]}  |  第 {qi + 1}/{qs_len} 题'
-                case_label.update()
+                _safe_update(case_label)
 
                 question_container.controls.clear()
                 w = _build_question_widget(question, f"{case['id']}_{question['id']}", all_answers, readonly, page)
                 question_container.controls.append(w)
-                question_container.update()
+                _safe_update(question_container)
 
                 _refresh_buttons()
                 update_progress()
@@ -576,7 +595,7 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
             )
             progress_text.value = '加载失败'
             case_label.value = ''
-            page.update()
+            _page_update()
 
     # 调度数据加载任务：等待页面控件加载完成后才执行（挂载前不调用任何方法）
     def _schedule_init(retry: int = 0):
@@ -591,9 +610,34 @@ def build_survey_taker_view(page: ft.Page, task_id: int, on_back=None, readonly:
                 return
             threading.Timer(0.05, _schedule_init, args=[retry + 1]).start()
             return
-        page.run_task(init_data)
+        # 通过 page.run_task 在 Flet 事件循环中执行加载
+        async def _async_init():
+            if (page.session.store.get('_view_generation') or 0) != _view_gen:
+                print('[survey] 加载执行时视图已切换，放弃')
+                return
+            try:
+                refresh_task()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+
+        page.run_task(_async_init)
 
     _schedule_init()
+
+    # 首次加载同步填充内容：构建阶段控件树尚未挂载，refresh_task 内部的
+    # 更新调用会被 _safe_update/_page_update 安全跳过，填充好的内容随
+    # route_change 末尾的 page.update() 一次性渲染。即使异步调度
+    # （Timer + parent 检测 + run_task）任一环节异常，页面也不会永远
+    # 停留在"正在加载题目数据..."。异步调度仍保留用于后续刷新。
+    _sync_build[0] = True
+    try:
+        refresh_task()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        _sync_build[0] = False
 
     # ================================================================
     # Phase 3: 立即返回 UI 骨架
@@ -691,7 +735,7 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                                     color='#1976D2' if is_selected else '#757575',
                                     size=20,
                                 ),
-                                ft.Text(label, size=16, color='#212121',
+                                ft.Text(label, size=20, color='#212121',
                                         overflow=ft.TextOverflow.VISIBLE, expand=True,
                                         no_wrap=False),
                             ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
@@ -775,7 +819,7 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                         content=ft.Checkbox(
                             value=is_checked,
                             label=label,
-                            label_style=ft.TextStyle(size=16, color='#212121'),
+                            label_style=ft.TextStyle(size=20, color='#212121'),
                             fill_color='#1976D2',
                             disabled=readonly,
                             on_change=(lambda e, o=opt: _on_check_toggle(o['label'], key, answers, open_enabled,
@@ -885,7 +929,7 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
     )
     column_controls.append(ft.Divider(height=8, color='transparent'))
     column_controls.append(
-        ft.Text(question['question_text'], size=16, weight=ft.FontWeight.W_500, color='#212121',
+        ft.Text(question['question_text'], size=20, weight=ft.FontWeight.W_500, color='#212121',
                 overflow=ft.TextOverflow.VISIBLE))
 
     hint = (question.get('hint') or '').strip()
@@ -897,14 +941,14 @@ def _build_question_widget(question: dict, key: str, answers: dict, readonly: bo
                     content=ft.Column([
                         ft.Row([
                             ft.Icon(ft.Icons.LIGHTBULB_OUTLINE, size=16, color='#FF8F00'),
-                            ft.Text('作答提示', size=15, color='#FF8F00',
+                            ft.Text('作答提示', size=19, color='#1565C0',
                                     weight=ft.FontWeight.W_600),
                         ], spacing=4),
-                        *[ft.Text(f'{i}. {line}', size=15, color='#FF8F00', italic=True,
+                        *[ft.Text(f'{i}. {line}', size=20, color='#1565C0',
                                   overflow=ft.TextOverflow.VISIBLE)
                           for i, line in enumerate(hint_lines, 1)],
                     ], spacing=2),
-                    bgcolor='#FFF8E1',
+                    bgcolor='#E3F2FD',
                     border_radius=8,
                     padding=ft.Padding(10, 8, 10, 8),
                 )

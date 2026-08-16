@@ -103,11 +103,25 @@ def build_student_dashboard(page: ft.Page, on_enter_task) -> list:
             if (page.session.store.get('_view_generation') or 0) != _view_gen:
                 print('[dashboard] 刷新执行时视图已切换，放弃')
                 return
-            refresh_task()
+            try:
+                refresh_task()
+            except Exception:
+                import traceback
+                traceback.print_exc()
 
         page.run_task(_async_refresh)
 
     _schedule_refresh()
+
+    # 首次加载同步填充内容：构建阶段控件树尚未挂载，refresh_task 内部的
+    # update 会被跳过，填充好的控件随 route_change 末尾的 page.update()
+    # 一次性渲染。避免异步调度（Timer + parent 检测 + run_task）异常时
+    # 页面只显示标题、内容区永久空白。异步调度仍保留用于数据刷新。
+    try:
+        refresh_task()
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
     return [
         ft.Column([
@@ -558,15 +572,15 @@ def _add_history_tasks(container: ft.Column, student_id: int, page: ft.Page, on_
         ft.Divider(height=15, color='transparent'),
     )
 
-    expand = ft.Ref[bool]()
-    expand.current = False
+    expand = False
 
     history_list = ft.Column(spacing=6)
 
     def toggle_history(e):
-        expand.current = not expand.current
-        history_list.visible = expand.current
-        toggle_btn.icon = ft.Icons.EXPAND_LESS if expand.current else ft.Icons.EXPAND_MORE
+        nonlocal expand
+        expand = not expand
+        history_list.visible = expand
+        toggle_btn.icon = ft.Icons.EXPAND_LESS if expand else ft.Icons.EXPAND_MORE
         toggle_btn.update()
         history_list.update()
 
