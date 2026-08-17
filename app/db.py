@@ -20,7 +20,9 @@ _sqlite_lock = threading.RLock()   # SQLite 单连接并发访问锁（可重入
 _initialized = False
 
 # SQLite 数据库文件路径
-SQLITE_DB_PATH = os.path.join(BASE_DIR, 'survey.db')
+##SQLITE_DB_PATH = os.path.join(BASE_DIR, 'survey.db')
+mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "./data")
+SQLITE_DB_PATH = os.path.join(mount_path, "survey.db")
 
 
 def _init_sqlite():
