@@ -993,6 +993,8 @@ def main(page: ft.Page):
     # 启动时尝试连接数据库
     try:
         test_connection()
+        # 连接成功：暂存提示标记，等首个视图渲染完成后由 route_change 弹出 SnackBar
+        page.session.store.set('_db_connected', True)
     except Exception as e:
         page.add(ft.Text(f'数据库连接失败: {e}', color='#FF5252'))
         return
@@ -1042,6 +1044,14 @@ def main(page: ft.Page):
         page.update()
         print(f'[ROUTE] page updated, views count={len(page.views)}')
 
+        # 数据库连接成功提示：首次页面渲染完成后展示一次
+        if page.session.store.get('_db_connected'):
+            page.session.store.remove('_db_connected')
+            snack = ft.SnackBar(ft.Text('数据库连接成功'), bgcolor='#4CAF50')
+            page.overlay.append(snack)
+            snack.open = True
+            page.update()
+
     page.on_route_change = route_change
 
     # 阻止从 dashboard / 知情同意页 / 背景资料页通过返回手势回退到登录页
@@ -1073,4 +1083,4 @@ import os
 if __name__ == '__main__':
    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(os.environ.get('PORT', 8000))
        , host='0.0.0.0',web_renderer=ft.WebRenderer.CANVAS_KIT)
-    ##ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER)
